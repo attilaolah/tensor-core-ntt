@@ -57,7 +57,7 @@ load_matrix2_packed4cols_n_lane(std::uint64_t *const a, view_type view,
 template <class view_type>
 static __device__ void load_matrix2_packed4cols_n(std::uint64_t *const a,
                                                   view_type view) {
-  const int laneId = polyarith::cuda::get_laneId();
+  const int laneId = get_laneId();
 
   load_matrix2_packed4cols_n_lane(a, view, laneId);
 }
@@ -90,7 +90,7 @@ load_matrix2_packed4cols_t_lane(std::uint64_t *const a, view_type view,
 template <class view_type>
 static __device__ void load_matrix2_packed4cols_t(std::uint64_t *const a,
                                                   view_type view) {
-  const int laneId = polyarith::cuda::get_laneId();
+  const int laneId = get_laneId();
 
   load_matrix2_packed4cols_t_lane(a, view, laneId);
 }
@@ -98,7 +98,7 @@ static __device__ void load_matrix2_packed4cols_t(std::uint64_t *const a,
 template <class view_type>
 static __device__ void
 store_matrix2_packed2cols_n(view_type view, const std::uint64_t *const a) {
-  const int laneId = polyarith::cuda::get_laneId();
+  const int laneId = get_laneId();
   const dim3 groupIdx(laneId % 4, laneId / 4);
 
   if constexpr (std::same_as<typename view_type::col_stride,
@@ -133,7 +133,7 @@ store_matrix2_packed2cols_n(view_type view, const std::uint64_t *const a) {
 template <class view_type>
 static __device__ void
 store_matrix2_packed2cols_t(view_type view, const std::uint64_t *const a) {
-  const int laneId = polyarith::cuda::get_laneId();
+  const int laneId = get_laneId();
   const dim3 groupIdx(laneId % 4, laneId / 4);
 
   for (int i = 0; i < view_type::per_warp_size; ++i) {
@@ -146,7 +146,7 @@ store_matrix2_packed2cols_t(view_type view, const std::uint64_t *const a) {
 template <class view_type>
 static __device__ void load_matrix_packed1col_n(std::uint64_t a[8],
                                                 view_type view) {
-  const int laneId = polyarith::cuda::get_laneId();
+  const int laneId = get_laneId();
 
   for (int i = 0; i < 8; ++i) {
     const int row = 2 * i + 1 * (laneId / 16);
@@ -158,7 +158,7 @@ static __device__ void load_matrix_packed1col_n(std::uint64_t a[8],
 template <class view_type>
 static __device__ void load_matrix_packed1col_t(std::uint64_t a[8],
                                                 view_type view) {
-  const int laneId = polyarith::cuda::get_laneId();
+  const int laneId = get_laneId();
 
   for (int i = 0; i < 8; ++i) {
     const int row = laneId % 16;
@@ -170,7 +170,7 @@ static __device__ void load_matrix_packed1col_t(std::uint64_t a[8],
 template <class view_type>
 static __device__ void store_matrix_packed1col_n(view_type view,
                                                  const std::uint64_t a[8]) {
-  const int laneId = polyarith::cuda::get_laneId();
+  const int laneId = get_laneId();
 
   for (int i = 0; i < 8; ++i) {
     const int row = 2 * i + 1 * (laneId / 16);
@@ -182,7 +182,7 @@ static __device__ void store_matrix_packed1col_n(view_type view,
 template <class view_type>
 static __device__ void store_matrix_packed1col_t(view_type view,
                                                  const std::uint64_t a[8]) {
-  const int laneId = polyarith::cuda::get_laneId();
+  const int laneId = get_laneId();
 
   for (int i = 0; i < 8; ++i) {
     const int row = laneId % 16;
@@ -193,7 +193,7 @@ static __device__ void store_matrix_packed1col_t(view_type view,
 
 static __device__ void
 matrix_8x16_packed2cols_to_packed4cols(std::uint64_t a[4]) {
-  const int laneId = polyarith::cuda::get_laneId();
+  const int laneId = get_laneId();
   const dim3 groupIdx(laneId % 4, laneId / 4);
 
   const int src0 = ((laneId & 0x2) >> 1) | ((laneId & 0x1) << 1);

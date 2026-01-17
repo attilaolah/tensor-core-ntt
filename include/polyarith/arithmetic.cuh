@@ -5,14 +5,17 @@
 #define POLYARITH_ARITHMETIC_CUH_INCLUDED
 
 #include <bit>
+#include <concepts>
 #include <cstdint>
 
 namespace polyarith {
 
 namespace arithmetic {
 
-static constexpr std::uint32_t bitswap_within(std::uint32_t value,
-                                              const int width) {
+template <class T>
+static constexpr std::uint32_t bitswap_within(T value, const int width)
+  requires std::same_as<T, std::uint32_t>
+{
   constexpr std::uint32_t c0 = UINT32_C(0x5555'5555),
                           c1 = UINT32_C(0x3333'3333),
                           c2 = UINT32_C(0x0f0f'0f0f),
@@ -25,10 +28,11 @@ static constexpr std::uint32_t bitswap_within(std::uint32_t value,
   return value >> (32 - width);
 }
 
-static __host__ __device__ std::uint32_t concatenate(const std::uint8_t a0,
-                                                     const std::uint8_t a1,
-                                                     const std::uint8_t a2,
-                                                     const std::uint8_t a3) {
+template <class T>
+static __host__ __device__ std::uint32_t concatenate(const T a0, const T a1,
+                                                     const T a2, const T a3)
+  requires std::same_as<T, std::uint8_t>
+{
 #if defined(__CUDA_ARCH__)
   std::uint32_t b;
   asm("{\n"
@@ -52,8 +56,10 @@ static __host__ __device__ std::uint32_t concatenate(const std::uint8_t a0,
 #endif
 }
 
-static __host__ __device__ std::uint64_t concatenate(const std::uint32_t a0,
-                                                     const std::uint32_t a1) {
+template <class T>
+static __host__ __device__ std::uint64_t concatenate(const T a0, const T a1)
+  requires std::same_as<T, std::uint32_t>
+{
 #if defined(__CUDA_ARCH__)
   std::uint64_t b;
   asm("mov.b64 %0, {%1, %2};" : "=l"(b) : "r"(a0), "r"(a1));
@@ -101,8 +107,10 @@ subtract_and_add_if_borrows(const std::uint64_t a, const std::uint64_t b,
 #endif
 }
 
-static __host__ __device__ std::uint32_t multiply_high(const std::uint32_t a,
-                                                       const std::uint32_t b) {
+template <class T>
+static __host__ __device__ std::uint32_t multiply_high(const T a, const T b)
+  requires std::same_as<T, std::uint32_t>
+{
 #if defined(__CUDA_ARCH__)
   return __umulhi(a, b);
 #else
@@ -110,8 +118,21 @@ static __host__ __device__ std::uint32_t multiply_high(const std::uint32_t a,
 #endif
 }
 
-static __host__ __device__ std::uint64_t multiply_wide(const std::uint32_t a,
-                                                       const std::uint32_t b) {
+template <class T>
+static __host__ __device__ std::uint64_t multiply_high(const T a, const T b)
+  requires std::same_as<T, std::uint64_t>
+{
+#if defined(__CUDA_ARCH__)
+  return __umul64hi(a, b);
+#else
+  return (static_cast<unsigned __int128>(a) * b) >> 64;
+#endif
+}
+
+template <class T>
+static __host__ __device__ std::uint64_t multiply_wide(const T a, const T b)
+  requires std::same_as<T, std::uint32_t>
+{
 #if defined(__CUDA_ARCH__)
   std::uint64_t c;
   asm("mul.wide.u32 %0, %1, %2;" : "=l"(c) : "r"(a), "r"(b));
@@ -121,8 +142,10 @@ static __host__ __device__ std::uint64_t multiply_wide(const std::uint32_t a,
 #endif
 }
 
-static __host__ __device__ unsigned __int128
-multiply_wide(const std::uint64_t a, const std::uint64_t b) {
+template <class T>
+static __host__ __device__ unsigned __int128 multiply_wide(const T a, const T b)
+  requires std::same_as<T, std::uint64_t>
+{
   return static_cast<unsigned __int128>(a) * b;
 }
 

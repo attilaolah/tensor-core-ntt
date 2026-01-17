@@ -408,19 +408,19 @@ public:
 
   __host__ __device__ std::uint64_t multiply(const std::uint64_t a,
                                              const std::uint64_t N) const {
-    const std::uint32_t a0 = static_cast<std::uint32_t>(a);
-    const std::uint32_t a1 = static_cast<std::uint32_t>(a >> 32);
-    const std::uint32_t b0 = static_cast<std::uint32_t>(b);
-    const std::uint32_t b1 = static_cast<std::uint32_t>(b >> 32);
-    const std::uint32_t N1 = static_cast<std::uint32_t>(N >> 32);
+    const std::uint32_t a0 = a;
+    const std::uint32_t a1 = a >> 32;
+    const std::uint32_t b0 = b;
+    const std::uint32_t b1 = b >> 32;
+    const std::uint32_t N1 = N >> 32;
 
     std::uint64_t c;
     c = arithmetic::multiply_wide(a0, b0) + (std::uint64_t(1) << 32);
-    c = arithmetic::concatenate(static_cast<std::uint32_t>(c >> 32), N1 + 1) -
-        arithmetic::multiply_wide(static_cast<std::uint32_t>(c), N1) +
+    c = arithmetic::concatenate<std::uint32_t>(c >> 32, N1 + 1) -
+        arithmetic::multiply_wide<std::uint32_t>(c, N1) +
         arithmetic::multiply_wide(a0, b1) + arithmetic::multiply_wide(a1, b0);
-    c = arithmetic::concatenate(static_cast<std::uint32_t>(c >> 32), N1) -
-        arithmetic::multiply_wide(static_cast<std::uint32_t>(c), N1) +
+    c = arithmetic::concatenate<std::uint32_t>(c >> 32, N1) -
+        arithmetic::multiply_wide<std::uint32_t>(c, N1) +
         arithmetic::multiply_wide(a1, b1);
 
     if (static_cast<std::uint32_t>(c) >= 1 &&

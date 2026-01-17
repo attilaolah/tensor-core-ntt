@@ -53,8 +53,7 @@ public:
 
     for (int laneId = 0; laneId < 32; ++laneId) {
       std::uint64_t a[8];
-      polyarith::cuda::load_matrix_16x16_packed4cols_n_lane(
-          a, &forward_ntt[0][0], 16, laneId);
+      load_matrix_16x16_packed4cols_n_lane(a, &forward_ntt[0][0], 16, laneId);
       for (int pos = 0; pos < 8; ++pos) {
         std::uint8_t aa[8];
         for (int i = 0; i < 8; ++i) {
@@ -66,7 +65,7 @@ public:
   }
 
   __device__ void get(void *const out) const {
-    const int laneId = polyarith::cuda::get_laneId();
+    const int laneId = get_laneId();
 
     for (int i = 0; i < (reduction_type::modulus_bits + 7) / 8; ++i) {
       reinterpret_cast<std::uint64_t *>(out)[i] =
@@ -88,7 +87,7 @@ private:
       for (int j = 0; j < num_digits; ++j) {
         const int k = i - j;
         if (0 <= k && k < num_digits) {
-          polyarith::cuda::mma_m16n16k16(ss[i], aa[j], bb[k], ss[i]);
+          mma_m16n16k16(ss[i], aa[j], bb[k], ss[i]);
         }
       }
     }
@@ -111,12 +110,11 @@ private:
 public:
   __device__ void compute_2n(std::uint64_t a[8], const std::uint64_t modulus,
                              const reduction_type &reduction) const {
-    const int laneId = polyarith::cuda::get_laneId();
+    const int laneId = get_laneId();
     const dim3 groupIdx(laneId % 4, laneId / 4);
 
     std::uint32_t aa[8][2];
-    polyarith::cuda::matrix_16x16_decompose_u64_to_u8<
-        reduction_type::modulus_bits>(aa, a);
+    matrix_16x16_decompose_u64_to_u8<reduction_type::modulus_bits>(aa, a);
 
     __align__(16) std::uint32_t forward_ntt[8][2];
     get(forward_ntt);
@@ -128,12 +126,11 @@ public:
 
   __device__ void compute_2t(std::uint64_t a[8], const std::uint64_t modulus,
                              const reduction_type &reduction) const {
-    const int laneId = polyarith::cuda::get_laneId();
+    const int laneId = get_laneId();
     const dim3 groupIdx(laneId % 4, laneId / 4);
 
     std::uint32_t aa[8][2];
-    polyarith::cuda::matrix_16x16_decompose_u64_to_u8<
-        reduction_type::modulus_bits>(aa, a);
+    matrix_16x16_decompose_u64_to_u8<reduction_type::modulus_bits>(aa, a);
 
     __align__(16) std::uint32_t forward_ntt[8][2];
     get(forward_ntt);
@@ -189,8 +186,8 @@ private:
           bb[8],
       const nvcuda::wmma::layout_t layout, const std::uint64_t modulus,
       const reduction_type &reduction) {
-    const int laneId = polyarith::cuda::get_laneId();
-    const int warpId = polyarith::cuda::get_warpId<2>();
+    const int laneId = get_laneId();
+    const int warpId = get_warpId<2>();
 
     nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, std::int32_t>
         ss[15], tt[8];
@@ -240,12 +237,11 @@ public:
                           const nvcuda::wmma::layout_t layout,
                           const std::uint64_t modulus,
                           const reduction_type &reduction) const {
-    const int laneId = polyarith::cuda::get_laneId();
-    const int warpId = polyarith::cuda::get_warpId<2>();
+    const int laneId = get_laneId();
+    const int warpId = get_warpId<2>();
 
     std::uint32_t aa[8][2];
-    polyarith::cuda::matrix_16x16_decompose_u64_to_u8<
-        reduction_type::modulus_bits>(aa, a);
+    matrix_16x16_decompose_u64_to_u8<reduction_type::modulus_bits>(aa, a);
 
     extern __shared__ std::uint8_t bb[][8][16][16];
     for (int pos = 0; pos < 8; ++pos) {
@@ -284,7 +280,7 @@ public:
   static constexpr int radix = radix_;
 
 private:
-  using multiplier_type = polyarith::modular::MontgomeryFriendlyMultiplier64;
+  using multiplier_type = modular::MontgomeryFriendlyMultiplier64;
 
   multiplier_type values[radix - 1][n / radix];
 
@@ -320,10 +316,10 @@ public:
   }
 
 private:
-  static __device__ void montgomery_butterfly(
-      std::uint64_t &a0, std::uint64_t &a1,
-      const polyarith::modular::MontgomeryFriendlyMultiplier64 omega,
-      const std::uint64_t N) {
+  static __device__ void
+  montgomery_butterfly(std::uint64_t &a0, std::uint64_t &a1,
+                       const modular::MontgomeryFriendlyMultiplier64 omega,
+                       const std::uint64_t N) {
     std::uint64_t b0;
     b0 = a0 + a1;
     if (b0 >= N * 2) {
@@ -341,7 +337,7 @@ private:
   template <int radix>
   static __device__ void montgomery_butterfly(
       std::uint64_t a[radix],
-      const polyarith::modular::MontgomeryFriendlyMultiplier64 omega[radix - 1],
+      const modular::MontgomeryFriendlyMultiplier64 omega[radix - 1],
       const std::uint64_t N) {
     for (int i = 0; i < radix / 2; ++i) {
       montgomery_butterfly(a[radix / 2 * 0 + i], a[radix / 2 * 1 + i], omega[i],

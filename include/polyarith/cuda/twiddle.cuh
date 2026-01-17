@@ -22,7 +22,7 @@ namespace cuda {
 
 class NttForwardTwiddle16x16Coalesced {
 
-  using multiplier_type = polyarith::modular::MontgomeryFriendlyMultiplier64;
+  using multiplier_type = modular::MontgomeryFriendlyMultiplier64;
 
   struct {
     struct {
@@ -46,8 +46,8 @@ public:
 
     for (int laneId = 0; laneId < 32; ++laneId) {
       std::uint64_t a[8];
-      polyarith::cuda::load_matrix_16x16_packed2cols_n_lane(
-          a, &forward_twiddle[0][0], 16, laneId);
+      load_matrix_16x16_packed2cols_n_lane(a, &forward_twiddle[0][0], 16,
+                                           laneId);
       for (int i = 0; i < 8; ++i) {
         values[i].by_lane[laneId].values[0] =
             multiplier_type(a[i], modulus.get_modulus());
@@ -56,7 +56,7 @@ public:
   }
 
   __device__ void get(multiplier_type out[8]) const {
-    const int laneId = polyarith::cuda::get_laneId();
+    const int laneId = get_laneId();
 
     for (int i = 0; i < 8; ++i) {
       out[i] = values[i].by_lane[laneId].values[0];
@@ -76,7 +76,7 @@ public:
 
 class NttForwardTwiddleWmma16x16 {
 
-  using multiplier_type = polyarith::modular::MontgomeryFriendlyMultiplier64;
+  using multiplier_type = modular::MontgomeryFriendlyMultiplier64;
 
   multiplier_type values[16][16];
 
@@ -103,15 +103,13 @@ public:
   }
 
   __device__ void get(multiplier_type out[8]) const {
-    const int laneId = polyarith::cuda::get_laneId();
+    const int laneId = get_laneId();
 
     static_assert(sizeof(multiplier_type) == sizeof(std::uint64_t));
-    polyarith::MatrixView<16, polyarith::UnreducedRatio<16>, 16,
-                          polyarith::UnreducedRatio<1>>
-        view(reinterpret_cast<const std::uint64_t *>(&values[0][0]));
+    MatrixView<16, UnreducedRatio<16>, 16, UnreducedRatio<1>> view(
+        reinterpret_cast<const std::uint64_t *>(&values[0][0]));
 
-    polyarith::cuda::load_matrix_packed1col_n(
-        reinterpret_cast<std::uint64_t *>(out), view);
+    load_matrix_packed1col_n(reinterpret_cast<std::uint64_t *>(out), view);
   }
 
   __device__ void compute(std::uint64_t uu[8],
@@ -135,7 +133,7 @@ public:
                 n >= 16 * 16);
 
 private:
-  using multiplier_type = polyarith::modular::MontgomeryFriendlyMultiplier64;
+  using multiplier_type = modular::MontgomeryFriendlyMultiplier64;
 
   struct {
     struct {
@@ -152,8 +150,7 @@ public:
     const std::uint64_t root = modulus.get_root_forward(n);
 
     std::vector<std::uint64_t> forward_twiddle_data(n);
-    polyarith::MatrixView<16, polyarith::UnreducedRatio<n / 16>, n / 16,
-                          polyarith::UnreducedRatio<1>>
+    MatrixView<16, UnreducedRatio<n / 16>, n / 16, UnreducedRatio<1>>
         forward_twiddle(forward_twiddle_data.data());
 #pragma omp parallel for collapse(2)
     for (int row = 0; row < 16; ++row) {
@@ -167,8 +164,8 @@ public:
     for (int col = 0; col < n / 16; col += 16) {
       for (int laneId = 0; laneId < 32; ++laneId) {
         std::uint64_t a[8];
-        polyarith::cuda::load_matrix_16x16_packed2cols_n_lane(
-            a, &forward_twiddle.at(0, col), n / 16, laneId);
+        load_matrix_16x16_packed2cols_n_lane(a, &forward_twiddle.at(0, col),
+                                             n / 16, laneId);
         for (int i = 0; i < 8; ++i) {
           values[col / 16].subblock[i].by_lane[laneId].value =
               multiplier_type(a[i], modulus.get_modulus());
@@ -178,7 +175,7 @@ public:
   }
 
   __device__ void get(multiplier_type out[8], const int index) const {
-    const int laneId = polyarith::cuda::get_laneId();
+    const int laneId = get_laneId();
 
     for (int i = 0; i < 8; ++i) {
       out[i] = values[index].subblock[i].by_lane[laneId].value;
@@ -206,7 +203,7 @@ public:
                 n >= 16 * 16);
 
 private:
-  using multiplier_type = polyarith::modular::MontgomeryFriendlyMultiplier64;
+  using multiplier_type = modular::MontgomeryFriendlyMultiplier64;
 
   multiplier_type values[n / 16 / 16][16][16];
 
@@ -217,8 +214,7 @@ public:
     const std::uint64_t root = modulus.get_root_forward(n);
 
     std::vector<std::uint64_t> forward_twiddle_data(n);
-    polyarith::MatrixView<16, polyarith::UnreducedRatio<n / 16>, n / 16,
-                          polyarith::UnreducedRatio<1>>
+    MatrixView<16, UnreducedRatio<n / 16>, n / 16, UnreducedRatio<1>>
         forward_twiddle(forward_twiddle_data.data());
 #pragma omp parallel for collapse(2)
     for (int row = 0; row < 16; ++row) {
@@ -242,13 +238,11 @@ public:
   __device__ void compute(std::uint64_t uu[8], const int index,
                           const std::uint64_t modulus) const {
     static_assert(sizeof(multiplier_type) == sizeof(std::uint64_t));
-    polyarith::MatrixView<16, polyarith::UnreducedRatio<16>, 16,
-                          polyarith::UnreducedRatio<1>>
-        view(reinterpret_cast<const std::uint64_t *>(&values[index][0][0]));
+    MatrixView<16, UnreducedRatio<16>, 16, UnreducedRatio<1>> view(
+        reinterpret_cast<const std::uint64_t *>(&values[index][0][0]));
 
     __align__(16) multiplier_type twiddle[8];
-    polyarith::cuda::load_matrix_packed1col_n(
-        reinterpret_cast<std::uint64_t *>(twiddle), view);
+    load_matrix_packed1col_n(reinterpret_cast<std::uint64_t *>(twiddle), view);
 
     for (int i = 0; i < 8; ++i) {
       uu[i] = twiddle[i].multiply(uu[i], modulus);

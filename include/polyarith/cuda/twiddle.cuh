@@ -40,7 +40,7 @@ public:
     for (int row = 0; row < 16; ++row) {
       for (int col = 0; col < 16; ++col) {
         forward_twiddle[row][col] = modulus.power(
-            root, polyarith::arithmetic::bitswap_within(row, 4) * col);
+            root, arithmetic::bitswap_within<std::uint32_t>(row, 4) * col);
       }
     }
 
@@ -90,7 +90,7 @@ public:
     for (int row = 0; row < 16; ++row) {
       for (int col = 0; col < 16; ++col) {
         forward_twiddle[row][col] = modulus.power(
-            root, polyarith::arithmetic::bitswap_within(row, 4) * col);
+            root, arithmetic::bitswap_within<std::uint32_t>(row, 4) * col);
       }
     }
 
@@ -159,7 +159,7 @@ public:
     for (int row = 0; row < 16; ++row) {
       for (int col = 0; col < n / 16; ++col) {
         forward_twiddle.at(row, col) = modulus.power(
-            root, polyarith::arithmetic::bitswap_within(row, 4) * col);
+            root, arithmetic::bitswap_within<std::uint32_t>(row, 4) * col);
       }
     }
 
@@ -224,7 +224,7 @@ public:
     for (int row = 0; row < 16; ++row) {
       for (int col = 0; col < n / 16; ++col) {
         forward_twiddle.at(row, col) = modulus.power(
-            root, polyarith::arithmetic::bitswap_within(row, 4) * col);
+            root, arithmetic::bitswap_within<std::uint32_t>(row, 4) * col);
       }
     }
 

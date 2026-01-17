@@ -45,8 +45,8 @@ public:
     for (int row = 0; row < 16; ++row) {
       for (int col = 0; col < 16; ++col) {
         forward_ntt[row][col] = modulus.multiply(
-            modulus.power(root,
-                          polyarith::arithmetic::bitswap_within(row, 4) * col),
+            modulus.power(
+                root, arithmetic::bitswap_within<std::uint32_t>(row, 4) * col),
             factor);
       }
     }
@@ -163,8 +163,8 @@ public:
     for (int row = 0; row < 16; ++row) {
       for (int col = 0; col < 16; ++col) {
         forward_ntt[row][col] = modulus.multiply(
-            modulus.power(root,
-                          polyarith::arithmetic::bitswap_within(row, 4) * col),
+            modulus.power(
+                root, arithmetic::bitswap_within<std::uint32_t>(row, 4) * col),
             factor);
       }
     }

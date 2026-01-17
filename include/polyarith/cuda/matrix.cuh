@@ -226,50 +226,50 @@ template <int num_bits>
 static __device__ void
 matrix_16x16_decompose_u64_to_u8(std::uint32_t aa[8][2],
                                  const std::uint64_t a[8]) {
-  aa[0][0] = polyarith::arithmetic::concatenate(a[0] >> 0, a[1] >> 0, a[2] >> 0,
-                                                a[3] >> 0);
-  aa[1][0] = polyarith::arithmetic::concatenate(a[0] >> 8, a[1] >> 8, a[2] >> 8,
-                                                a[3] >> 8);
-  aa[2][0] = polyarith::arithmetic::concatenate(a[0] >> 16, a[1] >> 16,
-                                                a[2] >> 16, a[3] >> 16);
-  aa[3][0] = polyarith::arithmetic::concatenate(a[0] >> 24, a[1] >> 24,
-                                                a[2] >> 24, a[3] >> 24);
-  aa[4][0] = polyarith::arithmetic::concatenate(a[0] >> 32, a[1] >> 32,
-                                                a[2] >> 32, a[3] >> 32);
+  aa[0][0] = arithmetic::concatenate<std::uint8_t>(a[0] >> 0, a[1] >> 0,
+                                                   a[2] >> 0, a[3] >> 0);
+  aa[1][0] = arithmetic::concatenate<std::uint8_t>(a[0] >> 8, a[1] >> 8,
+                                                   a[2] >> 8, a[3] >> 8);
+  aa[2][0] = arithmetic::concatenate<std::uint8_t>(a[0] >> 16, a[1] >> 16,
+                                                   a[2] >> 16, a[3] >> 16);
+  aa[3][0] = arithmetic::concatenate<std::uint8_t>(a[0] >> 24, a[1] >> 24,
+                                                   a[2] >> 24, a[3] >> 24);
+  aa[4][0] = arithmetic::concatenate<std::uint8_t>(a[0] >> 32, a[1] >> 32,
+                                                   a[2] >> 32, a[3] >> 32);
   if constexpr (num_bits > 40) {
-    aa[5][0] = polyarith::arithmetic::concatenate(a[0] >> 40, a[1] >> 40,
-                                                  a[2] >> 40, a[3] >> 40);
+    aa[5][0] = arithmetic::concatenate<std::uint8_t>(a[0] >> 40, a[1] >> 40,
+                                                     a[2] >> 40, a[3] >> 40);
   }
   if constexpr (num_bits > 48) {
-    aa[6][0] = polyarith::arithmetic::concatenate(a[0] >> 48, a[1] >> 48,
-                                                  a[2] >> 48, a[3] >> 48);
+    aa[6][0] = arithmetic::concatenate<std::uint8_t>(a[0] >> 48, a[1] >> 48,
+                                                     a[2] >> 48, a[3] >> 48);
   }
   if constexpr (num_bits > 56) {
-    aa[7][0] = polyarith::arithmetic::concatenate(a[0] >> 56, a[1] >> 56,
-                                                  a[2] >> 56, a[3] >> 56);
+    aa[7][0] = arithmetic::concatenate<std::uint8_t>(a[0] >> 56, a[1] >> 56,
+                                                     a[2] >> 56, a[3] >> 56);
   }
 
-  aa[0][1] = polyarith::arithmetic::concatenate(a[4] >> 0, a[5] >> 0, a[6] >> 0,
-                                                a[7] >> 0);
-  aa[1][1] = polyarith::arithmetic::concatenate(a[4] >> 8, a[5] >> 8, a[6] >> 8,
-                                                a[7] >> 8);
-  aa[2][1] = polyarith::arithmetic::concatenate(a[4] >> 16, a[5] >> 16,
-                                                a[6] >> 16, a[7] >> 16);
-  aa[3][1] = polyarith::arithmetic::concatenate(a[4] >> 24, a[5] >> 24,
-                                                a[6] >> 24, a[7] >> 24);
-  aa[4][1] = polyarith::arithmetic::concatenate(a[4] >> 32, a[5] >> 32,
-                                                a[6] >> 32, a[7] >> 32);
+  aa[0][1] = arithmetic::concatenate<std::uint8_t>(a[4] >> 0, a[5] >> 0,
+                                                   a[6] >> 0, a[7] >> 0);
+  aa[1][1] = arithmetic::concatenate<std::uint8_t>(a[4] >> 8, a[5] >> 8,
+                                                   a[6] >> 8, a[7] >> 8);
+  aa[2][1] = arithmetic::concatenate<std::uint8_t>(a[4] >> 16, a[5] >> 16,
+                                                   a[6] >> 16, a[7] >> 16);
+  aa[3][1] = arithmetic::concatenate<std::uint8_t>(a[4] >> 24, a[5] >> 24,
+                                                   a[6] >> 24, a[7] >> 24);
+  aa[4][1] = arithmetic::concatenate<std::uint8_t>(a[4] >> 32, a[5] >> 32,
+                                                   a[6] >> 32, a[7] >> 32);
   if constexpr (num_bits > 40) {
-    aa[5][1] = polyarith::arithmetic::concatenate(a[4] >> 40, a[5] >> 40,
-                                                  a[6] >> 40, a[7] >> 40);
+    aa[5][1] = arithmetic::concatenate<std::uint8_t>(a[4] >> 40, a[5] >> 40,
+                                                     a[6] >> 40, a[7] >> 40);
   }
   if constexpr (num_bits > 48) {
-    aa[6][1] = polyarith::arithmetic::concatenate(a[4] >> 48, a[5] >> 48,
-                                                  a[6] >> 48, a[7] >> 48);
+    aa[6][1] = arithmetic::concatenate<std::uint8_t>(a[4] >> 48, a[5] >> 48,
+                                                     a[6] >> 48, a[7] >> 48);
   }
   if constexpr (num_bits > 56) {
-    aa[7][1] = polyarith::arithmetic::concatenate(a[4] >> 56, a[5] >> 56,
-                                                  a[6] >> 56, a[7] >> 56);
+    aa[7][1] = arithmetic::concatenate<std::uint8_t>(a[4] >> 56, a[5] >> 56,
+                                                     a[6] >> 56, a[7] >> 56);
   }
 }
 

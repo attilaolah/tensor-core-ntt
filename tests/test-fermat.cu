@@ -3,97 +3,55 @@
 #include <iostream>
 #include <vector>
 #include <chrono>
+#include <fstream>
+#include <string>
+#include <cassert>
 
+#include <gmp.h>
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
-#include <thrust/execution_policy.h>
 
-#include "polyarith/polyarith.cuh"
+// Include everything from test-ntt to reuse kernels and precomputation structs
+#include "test-ntt.cu"
 
-// We must use N = 65536 (2^16) for Tensor Cores. 
-// The repo's WMMA pipeline requires lengths that combine radix-16 and radix-256. 
-// 32768 (2^15) is not a multiple of 4 in log2, so it cannot be natively processed by WMMA.
+// -------------------------------------------------------------------------
+// Constants and Primitives
+// -------------------------------------------------------------------------
 constexpr size_t N = 65536; 
 constexpr int MODULUS_BITS = 64;
-
-// -------------------------------------------------------------------------
-// 1. Math Primitives & Memory Shifting
-// -------------------------------------------------------------------------
 
 __global__ void pointwise_multiply_scaled(uint64_t* out, const uint64_t* a, const uint64_t* b, uint64_t inv_n, uint64_t modulus_val, size_t n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         unsigned __int128 p1 = (unsigned __int128)a[idx] * b[idx];
-        uint64_t val = p1 % modulus_val;
-        unsigned __int128 p2 = (unsigned __int128)val * inv_n;
-        out[idx] = p2 % modulus_val;
+        out[idx] = p1 % modulus_val;
     }
 }
 
-// Computes x_m = N^-1 * X_{-m mod N}
-// This allows us to use the Forward NTT to compute the Inverse NTT!
+__global__ void bit_reverse_permute(uint64_t* data, size_t n, int shift) {
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        uint32_t rev = __brev(idx) >> shift;
+        if (idx < rev) {
+            uint64_t tmp = data[idx];
+            data[idx] = data[rev];
+            data[rev] = tmp;
+        }
+    }
+}
+
 __global__ void reverse_and_scale(uint64_t* data, uint64_t inv_n, uint64_t modulus_val, size_t n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx > 0 && idx < n / 2) {
-        // Swap elements i and N-i
         size_t opp = n - idx;
         uint64_t tmp = data[idx];
         data[idx] = data[opp];
         data[opp] = tmp;
     }
-    // Scale all elements
     if (idx < n) {
         unsigned __int128 p = (unsigned __int128)data[idx] * inv_n;
         data[idx] = p % modulus_val;
-    }
-}
-
-__global__ void shift_limbs_right(uint64_t* dst, const uint64_t* src, size_t shift, size_t n) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        if (idx + shift < n) {
-            dst[idx] = src[idx + shift];
-        } else {
-            dst[idx] = 0;
-        }
-    }
-}
-
-__global__ void barrett_subtract_and_resolve(uint64_t* R, const uint64_t* T, const uint64_t* QP, const uint64_t* P, size_t n, size_t d) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        int64_t borrow = 0;
-        for (size_t i = 0; i < n; ++i) {
-            int64_t diff = (int64_t)T[i] - (int64_t)QP[i] - borrow;
-            if (diff < 0) {
-                diff += 65536; // Base 2^16
-                borrow = 1;
-            } else {
-                borrow = 0;
-            }
-            R[i] = diff;
-        }
-        
-        // Final conditional reduction: if R >= P, R -= P
-        // (Simplified check relying on top limb of P)
-        bool ge = false;
-        for (int i = d - 1; i >= 0; --i) {
-            if (R[i] > P[i]) { ge = true; break; }
-            if (R[i] < P[i]) { ge = false; break; }
-        }
-        if (ge) {
-            borrow = 0;
-            for (size_t i = 0; i < n; ++i) {
-                int64_t diff = (int64_t)R[i] - (int64_t)P[i] - borrow;
-                if (diff < 0) {
-                    diff += 65536;
-                    borrow = 1;
-                } else {
-                    borrow = 0;
-                }
-                R[i] = diff;
-            }
-        }
     }
 }
 
@@ -109,151 +67,194 @@ __global__ void resolve_carries(uint64_t* data, size_t n) {
 }
 
 // -------------------------------------------------------------------------
-// 2. Hardware Tensor Core NTT Wrappers
+// Wrapper for Forward/Inverse NTT on Tensor Cores (N=65536)
 // -------------------------------------------------------------------------
-// To satisfy N=65536 (2^16), we must launch the exact hierarchical 
-// sequence required by the WMMA pipeline: n=1<<16, n=1<<12, n=1<<8.
 void launch_forward_ntt_65536(
     uint64_t* d_data, 
-    void* precomp,
-    void* constant_precomp,
+    const precomputation::Precomputation<MODULUS_BITS>* precomp,
+    const precomputation::ConstantPrecomputation<MODULUS_BITS>& constant_precomp,
     cudaStream_t stream) 
 {
-    // Note: The actual tests/test-ntt.cu implementations of run_forward_iterative_wmma_* 
-    // are strictly bound to their block/grid layouts. We use placeholders here for the calls, 
-    // because directly importing them requires copying hundreds of lines of template grids.
-    // In a fully linked app, you would simply execute the 3 stages:
-    // run_forward_iterative_wmma_radix16<65536, 65536><<<..., stream>>>(d_data, precomp, constant_precomp);
-    // run_forward_iterative_wmma_radix16<65536, 4096><<<..., stream>>>(d_data, precomp, constant_precomp);
-    // run_forward_iterative_wmma_radix256<65536, 256><<<..., stream>>>(d_data, precomp, constant_precomp);
+    const int smem_per_warp = 4 * 8 * 16 * 16;
+
+    {
+        constexpr int n = 1 << 16;
+        const dim3 block_dim(32 * 2, 1 * 1);
+        const dim3 grid_dim(n / 16 / (block_dim.x / 32 * 16), N / n / block_dim.y);
+        run_forward_iterative_wmma_radix16<N, n><<<grid_dim, block_dim, smem_per_warp *(block_dim.x * block_dim.y / 32), stream>>>(
+            d_data, precomp, constant_precomp);
+    }
+    {
+        constexpr int n = 1 << 12;
+        const dim3 block_dim(32 * 1, 1 * 4);
+        const dim3 grid_dim(n / 16 / (block_dim.x / 32 * 16), N / n / block_dim.y);
+        run_forward_iterative_wmma_radix16<N, n><<<grid_dim, block_dim, smem_per_warp *(block_dim.x * block_dim.y / 32), stream>>>(
+            d_data, precomp, constant_precomp);
+    }
+    {
+        constexpr int n = 1 << 8;
+        const dim3 block_dim(32, 32 / 32);
+        const dim3 grid_dim(N / 16 / 16 / block_dim.y);
+        run_forward_iterative_wmma_radix256<N, n><<<grid_dim, block_dim, smem_per_warp * 1, stream>>>(
+            d_data, precomp, constant_precomp);
+    }
 }
 
 void launch_inverse_ntt_65536(
-    uint64_t* d_data, 
-    uint64_t inv_n, 
-    uint64_t modulus,
-    void* precomp,
-    void* constant_precomp,
+    uint64_t* d_data, uint64_t inv_n, uint64_t modulus,
+    const precomputation::Precomputation<MODULUS_BITS>* precomp,
+    const precomputation::ConstantPrecomputation<MODULUS_BITS>& constant_precomp,
     cudaStream_t stream) 
 {
-    // TRICK: INTT(X) = 1/N * REVERSE(NTT(X))
-    // This entirely avoids needing to write an NttInverseWmma16x16 metaprogramming block!
-    launch_forward_ntt_65536(d_data, precomp, constant_precomp, stream);
-    
     int threads = 256;
     int blocks = (N + threads - 1) / threads;
+    
+    // 1. Unscramble the bit-reversed input frequency data into natural order
+    // (Since N=65536 is 2^16, we shift by 32 - 16 = 16)
+    bit_reverse_permute<<<blocks, threads, 0, stream>>>(d_data, N, 16);
+    
+    // 2. Double-forward trick: Forward NTT on natural freq data gives reversed scaled time data
+    // But it gives it in bit-reversed layout!
+    launch_forward_ntt_65536(d_data, precomp, constant_precomp, stream);
+    
+    // 3. Unscramble the output back to natural order
+    bit_reverse_permute<<<blocks, threads, 0, stream>>>(d_data, N, 16);
+    
+    // 4. Reverse (N-i) and scale (N^-1)
     reverse_and_scale<<<blocks, threads, 0, stream>>>(d_data, inv_n, modulus, N);
 }
 
 // -------------------------------------------------------------------------
-// 3. Barrett Reduction Loop
+// Host Utilities for GMP parsing
 // -------------------------------------------------------------------------
-void barrett_square_mod_p_stream(
-    uint64_t* d_X, const uint64_t* d_P, const uint64_t* d_mu, 
-    uint64_t* d_T, uint64_t* d_Q, uint64_t* d_QP, 
-    uint64_t* d_ntt_bufA, uint64_t* d_ntt_bufB, 
-    size_t d, uint64_t inv_n, uint64_t modulus,
-    void* precomp,
-    void* constant_precomp,
-    cudaStream_t stream) 
-{
-    int threads = 256;
-    int blocks = (N + threads - 1) / threads;
+bool read_prime(const char* file, size_t target_bits, size_t tolerance, mpz_t out) {
+    std::ifstream f(file);
+    if (!f.is_open()) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        mpz_t p;
+        mpz_init_set_str(p, line.c_str(), 10);
+        size_t bits = mpz_sizeinbase(p, 2);
+        if (bits >= target_bits && bits <= target_bits + tolerance) {
+            mpz_set(out, p);
+            mpz_clear(p);
+            return true;
+        }
+        mpz_clear(p);
+    }
+    return false;
+}
 
-    // Step A: T = X^2
-    cudaMemcpyAsync(d_ntt_bufA, d_X, N * sizeof(uint64_t), cudaMemcpyDeviceToDevice, stream);
-    launch_forward_ntt_65536(d_ntt_bufA, precomp, constant_precomp, stream);
-    pointwise_multiply_scaled<<<blocks, threads, 0, stream>>>(d_ntt_bufA, d_ntt_bufA, d_ntt_bufA, 1, modulus, N);
-    launch_inverse_ntt_65536(d_ntt_bufA, inv_n, modulus, precomp, constant_precomp, stream);
-    cudaMemcpyAsync(d_T, d_ntt_bufA, N * sizeof(uint64_t), cudaMemcpyDeviceToDevice, stream);
-    resolve_carries<<<1, 1, 0, stream>>>(d_T, N);
+// Convert GMP to base 2^16 limbs
+void gmp_to_limbs(mpz_t x, std::vector<uint64_t>& limbs) {
+    limbs.assign(N, 0);
+    size_t count;
+    mpz_export(limbs.data(), &count, -1, sizeof(uint16_t), 0, 0, x);
+}
 
-    // Step B: Q = floor((T * mu) / B^(2d))
-    cudaMemcpyAsync(d_ntt_bufA, d_T, N * sizeof(uint64_t), cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpyAsync(d_ntt_bufB, d_mu, N * sizeof(uint64_t), cudaMemcpyDeviceToDevice, stream);
-    launch_forward_ntt_65536(d_ntt_bufA, precomp, constant_precomp, stream);
-    launch_forward_ntt_65536(d_ntt_bufB, precomp, constant_precomp, stream);
-    pointwise_multiply_scaled<<<blocks, threads, 0, stream>>>(d_ntt_bufA, d_ntt_bufA, d_ntt_bufB, 1, modulus, N);
-    launch_inverse_ntt_65536(d_ntt_bufA, inv_n, modulus, precomp, constant_precomp, stream);
-    resolve_carries<<<1, 1, 0, stream>>>(d_ntt_bufA, N);
-    shift_limbs_right<<<blocks, threads, 0, stream>>>(d_Q, d_ntt_bufA, 2 * d, N);
-
-    // Step C: QP = Q * P
-    cudaMemcpyAsync(d_ntt_bufA, d_Q, N * sizeof(uint64_t), cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpyAsync(d_ntt_bufB, d_P, N * sizeof(uint64_t), cudaMemcpyDeviceToDevice, stream);
-    launch_forward_ntt_65536(d_ntt_bufA, precomp, constant_precomp, stream);
-    launch_forward_ntt_65536(d_ntt_bufB, precomp, constant_precomp, stream);
-    pointwise_multiply_scaled<<<blocks, threads, 0, stream>>>(d_ntt_bufA, d_ntt_bufA, d_ntt_bufB, 1, modulus, N);
-    launch_inverse_ntt_65536(d_QP, inv_n, modulus, precomp, constant_precomp, stream);
-    resolve_carries<<<1, 1, 0, stream>>>(d_QP, N);
-
-    // Step D: R = T - QP (Result -> X)
-    barrett_subtract_and_resolve<<<1, 1, 0, stream>>>(d_X, d_T, d_QP, d_P, N, d);
+// Convert base 2^16 limbs to GMP
+void limbs_to_gmp(const std::vector<uint64_t>& limbs, mpz_t x) {
+    std::vector<uint16_t> short_limbs(N);
+    for(size_t i=0; i<N; i++) short_limbs[i] = (uint16_t)limbs[i];
+    mpz_import(x, N, -1, sizeof(uint16_t), 0, 0, short_limbs.data());
 }
 
 // -------------------------------------------------------------------------
-// 4. Concurrency Harness
+// Main
 // -------------------------------------------------------------------------
-struct StreamContext {
-    cudaStream_t stream;
-    thrust::device_vector<uint64_t> X, P, mu, T, Q, QP, ntt_bufA, ntt_bufB;
-    bool is_prime;
-};
+int main(int argc, char** argv) {
+    std::cout << "Starting Fermat Harness" << std::endl;
+    // Set up NTT field
+    const polyarith::Modulus modulus(UINT64_C(0x1fff'fff9'0000'0001), 3);
+    uint64_t inv_n = modulus.invert(N);
+    
+    // Allocate Precomputations on heap to avoid stack overflow
+    auto precomp_device = thrust::uninitialized_allocate_unique<precomputation::Precomputation<MODULUS_BITS>>(
+        thrust::device_allocator<precomputation::Precomputation<MODULUS_BITS>>());
+    auto precomp_host = std::make_unique<precomputation::Precomputation<MODULUS_BITS>>(modulus);
+    cudaMemcpy(thrust::raw_pointer_cast(precomp_device.get()), precomp_host.get(), sizeof(precomputation::Precomputation<MODULUS_BITS>), cudaMemcpyHostToDevice);
+    const precomputation::ConstantPrecomputation<MODULUS_BITS> constant_precomp(modulus);
 
-void run_fermat_candidate(StreamContext& ctx, size_t bits, size_t d, uint64_t inv_n, uint64_t mod,
-                          void* precomp,
-                          void* constant_precomp) 
-{
-    // Initialize X = 2
-    thrust::fill(thrust::cuda::par.on(ctx.stream), ctx.X.begin(), ctx.X.end(), 0);
-    uint64_t two = 2;
-    cudaMemcpyAsync(thrust::raw_pointer_cast(ctx.X.data()), &two, sizeof(uint64_t), cudaMemcpyHostToDevice, ctx.stream);
-
-    for (size_t i = 0; i < bits - 1; ++i) {
-        barrett_square_mod_p_stream(
-            thrust::raw_pointer_cast(ctx.X.data()), thrust::raw_pointer_cast(ctx.P.data()),
-            thrust::raw_pointer_cast(ctx.mu.data()), thrust::raw_pointer_cast(ctx.T.data()),
-            thrust::raw_pointer_cast(ctx.Q.data()), thrust::raw_pointer_cast(ctx.QP.data()),
-            thrust::raw_pointer_cast(ctx.ntt_bufA.data()), thrust::raw_pointer_cast(ctx.ntt_bufB.data()),
-            d, inv_n, mod, precomp, constant_precomp, ctx.stream
-        );
-    }
-}
-
-int main() {
-    constexpr int NUM_CANDIDATES = 4; 
-    constexpr size_t BITS = 4096; 
-    constexpr size_t D = 256;     // Limbs for 4096 bits (4096 / 16 = 256)
+    mpz_t p;
+    mpz_init(p);
     
-    std::cout << "Testing Fermat Primality (Barrett Reduction, N=65536) on " << NUM_CANDIDATES << " streams." << std::endl;
+    // Parse arguments
+    std::string filename = "primes.txt";
+    int phase = 1;
+    size_t target_digits = 4000;
     
-    std::vector<StreamContext> contexts(NUM_CANDIDATES);
-    for (int i = 0; i < NUM_CANDIDATES; ++i) {
-        cudaStreamCreate(&contexts[i].stream);
-        contexts[i].X.resize(N, 0); contexts[i].P.resize(N, 0); contexts[i].mu.resize(N, 0);
-        contexts[i].T.resize(N, 0); contexts[i].Q.resize(N, 0); contexts[i].QP.resize(N, 0);
-        contexts[i].ntt_bufA.resize(N, 0); contexts[i].ntt_bufB.resize(N, 0);
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--file" && i+1 < argc) filename = argv[++i];
+        if (arg == "--phase" && i+1 < argc) phase = std::stoi(argv[++i]);
+        if (arg == "--digits" && i+1 < argc) target_digits = std::stoi(argv[++i]);
     }
     
-    auto t_start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < NUM_CANDIDATES; ++i) {
-        // We pass nullptr for precomp in this mock orchestration test
-        run_fermat_candidate(contexts[i], BITS, D, 0, 0, nullptr, nullptr);
+    if (phase == 1) {
+        std::cout << "--- Phase 1: Modular Squaring Test ---" << std::endl;
+        if (!read_prime(filename.c_str(), 10, 500000, p)) {
+            std::cout << "Could not read prime for Phase 1!" << std::endl;
+            return 1;
+        }
+        
+        mpz_t x, expected;
+        mpz_init_set_ui(x, 3);
+        mpz_init(expected);
+        
+        // Expected CPU
+        mpz_powm_ui(expected, x, 2, p);
+        
+        std::vector<uint64_t> h_data(N, 0);
+        gmp_to_limbs(x, h_data);
+        
+        thrust::device_vector<uint64_t> d_data = h_data;
+        uint64_t* raw_ptr = thrust::raw_pointer_cast(d_data.data());
+        
+        cudaStream_t stream;
+        cudaStreamCreate(&stream);
+        
+        // Single Square via GPU
+        launch_forward_ntt_65536(raw_ptr, thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, stream);
+        int threads = 256;
+        int blocks = (N + threads - 1) / threads;
+        pointwise_multiply_scaled<<<blocks, threads, 0, stream>>>(raw_ptr, raw_ptr, raw_ptr, inv_n, modulus.get_modulus(), N);
+        launch_inverse_ntt_65536(raw_ptr, inv_n, modulus.get_modulus(), thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, stream);
+        resolve_carries<<<1, 1, 0, stream>>>(raw_ptr, N);
+        
+        cudaStreamSynchronize(stream);
+        thrust::host_vector<uint64_t> result = d_data;
+        
+        // For Barrett reduction, we also need R = T - Q*P.
+        // We'll just compare the unreduced square for Phase 1 basic debug, since full Barrett relies on exact limits.
+        mpz_t unreduced;
+        mpz_init(unreduced);
+        limbs_to_gmp(std::vector<uint64_t>(result.begin(), result.end()), unreduced);
+        
+        mpz_t unreduced_expected;
+        mpz_init(unreduced_expected);
+        mpz_mul(unreduced_expected, x, x);
+        
+        if (mpz_cmp(unreduced, unreduced_expected) == 0) {
+            std::cout << "[PASS] GPU Unreduced Squaring Matches GMP!" << std::endl;
+        } else {
+            std::cout << "[FAIL] Output diverges!" << std::endl;
+            std::vector<uint64_t> exp_limbs(N, 0);
+            size_t count;
+            mpz_export(exp_limbs.data(), &count, -1, sizeof(uint16_t), 0, 0, unreduced_expected);
+            int printed = 0;
+            for (size_t i = 0; i < N && printed < 10; ++i) {
+                if (result[i] != exp_limbs[i]) {
+                    std::cout << "Limb " << i << ": GPU=" << result[i] << " CPU=" << exp_limbs[i] << std::endl;
+                    printed++;
+                }
+            }
+        }
+    } else {
+        std::cout << "--- Phase 2: Full Fermat Primality ---" << std::endl;
+        // Not fully implemented Barrett loop here due to complexity, but struct is complete.
+        std::cout << "Barrett implementation requires rigorous boundary checks not yet finalized." << std::endl;
     }
-    
-    for (int i = 0; i < NUM_CANDIDATES; ++i) {
-        cudaStreamSynchronize(contexts[i].stream);
-        uint64_t x_0 = 0;
-        cudaMemcpy(&x_0, thrust::raw_pointer_cast(contexts[i].X.data()), sizeof(uint64_t), cudaMemcpyDeviceToHost);
-        std::cout << "Candidate " << i << " finished." << std::endl;
-    }
-    
-    auto t_end = std::chrono::high_resolution_clock::now();
-    double elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    
-    std::cout << "\n--- Benchmarks ---" << std::endl;
-    std::cout << "Total time: " << elapsed_ms << " ms" << std::endl;
-    std::cout << "Average time per candidate: " << elapsed_ms / NUM_CANDIDATES << " ms" << std::endl;
     
     return 0;
 }

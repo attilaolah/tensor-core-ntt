@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+cd "$(dirname "$0")/.."
 shopt -s globstar nullglob
 
 echo "Running clang-tidy..."

@@ -15,7 +15,7 @@ template <class T> static __device__ auto uniform_hint(const T value) -> T {
 [[maybe_unused]]
 static __device__ auto get_laneId() -> int {
   int laneId;
-  asm("mov.u32 %0, %laneid;" : "=r"(laneId));
+  asm("mov.u32 %0, %%laneid;" : "=r"(laneId));
   return laneId;
 }
 
@@ -48,7 +48,7 @@ static __device__ auto get_warpId() -> int
 [[maybe_unused]]
 static __device__ auto get_nWarpId() -> int {
   int nWarpId;
-  asm("mov.u32 %0, %nwarpid;" : "=r"(nWarpId));
+  asm("mov.u32 %0, %%nwarpid;" : "=r"(nWarpId));
   return nWarpId;
 }
 

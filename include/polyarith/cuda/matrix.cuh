@@ -5,7 +5,6 @@
 #define POLYARITH_CUDA_MATRIX_CUH_INCLUDED
 
 #include <cstdint>
-
 #include <cuda/std/utility>
 
 #include "../unreduced_ratio.cuh"

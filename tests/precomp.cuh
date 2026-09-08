@@ -1,7 +1,6 @@
 namespace precomputation {
 
 template <int modulus_bits_> class ConstantPrecomputation {
-
 public:
   constexpr static int modulus_bits = modulus_bits_;
 
@@ -16,13 +15,12 @@ public:
   ConstantPrecomputation(const polyarith::Modulus &modulus)
 
       : modulus(modulus.get_modulus()),
-        friendly_reduction(modulus.get_modulus()){}
+        friendly_reduction(modulus.get_modulus()) {}
 };
 
 /* Warning: Do not allocate this on stack. */
 
 template <int modulus_bits_> class Precomputation {
-
 public:
   constexpr static int modulus_bits = modulus_bits_;
 

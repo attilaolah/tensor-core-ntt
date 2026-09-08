@@ -24,6 +24,8 @@
           export LIBRARY_PATH=${pkgs.cudaPackages.cudatoolkit}/lib:$LIBRARY_PATH
         '';
       in {
+        formatter = pkgs.alejandra;
+
         packages.default = pkgs.stdenv.mkDerivation {
           pname = "tensor-core-ntt-crunch";
           version = "0.1.0";
@@ -38,7 +40,7 @@
           buildPhase = ''
             ${exports}
 
-            nvcc -std=c++20 -arch=sm_86 -O3 -Xcompiler -fopenmp -Iinclude tests/test-fermat.cu -o crunch_sm_86 -lgmp
+            nvcc -std=c++20 -arch=sm_86 -O3 -Xcompiler -fopenmp,-Wall,-Wextra,-Werror -Iinclude tests/test-fermat.cu -o crunch_sm_86 -lgmp
           '';
 
           installPhase = ''
@@ -59,6 +61,8 @@
             cudaPackages.cudatoolkit
             gmp
             pkg-config
+            clang-tools
+            alejandra
           ];
 
           shellHook = exports;

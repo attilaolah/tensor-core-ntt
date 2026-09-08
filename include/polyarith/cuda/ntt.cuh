@@ -4,12 +4,12 @@
 #ifndef POLYARITH_CUDA_NTT_CUH_INCLUDED
 #define POLYARITH_CUDA_NTT_CUH_INCLUDED
 
+#include <mma.h>
+
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
-
-#include <mma.h>
 
 #include "../arithmetic.cuh"
 #include "../modular.cuh"
@@ -23,7 +23,6 @@ namespace polyarith {
 namespace cuda {
 
 template <class reduction_type_> class NttForward16x16Coalesced {
-
 public:
   using reduction_type = reduction_type_;
 
@@ -142,7 +141,6 @@ public:
 };
 
 template <class reduction_type_> class NttForwardWmma16x16 {
-
 public:
   using reduction_type = reduction_type_;
 
@@ -274,7 +272,6 @@ public:
 };
 
 template <int n_, int radix_> class NttForwardScalarIterative {
-
 public:
   static constexpr int n = n_;
   static constexpr int radix = radix_;

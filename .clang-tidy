@@ -1,0 +1,1 @@
+Checks: 'abseil-*,google-*,modernize-*,openmp-*,performance-*,boost-*,bugprone-*,clang-analyzer-*,concurrency-*'

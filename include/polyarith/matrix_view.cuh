@@ -12,7 +12,6 @@ namespace polyarith {
 
 template <int rows_, class row_stride_, int cols_, class col_stride_>
 class MatrixView {
-
 public:
   static constexpr int rows = rows_;
   using row_stride = row_stride_;

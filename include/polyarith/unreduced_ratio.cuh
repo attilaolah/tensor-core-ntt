@@ -9,7 +9,6 @@
 namespace polyarith {
 
 template <int num_, int den_ = 1> class UnreducedRatio {
-
 public:
   static constexpr int num = num_;
   static constexpr int den = den_;

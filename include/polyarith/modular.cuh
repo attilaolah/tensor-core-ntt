@@ -42,7 +42,6 @@ calculate_montgomery_inverse(const std::uint64_t modulus) {
 }
 
 template <int modulus_bits_> class MontgomeryFriendlyReductionBy64 {
-
 public:
   constexpr static int modulus_bits = modulus_bits_;
 
@@ -364,7 +363,6 @@ public:
 };
 
 class MontgomeryMultiplier64 {
-
   std::uint64_t b;
   std::uint64_t bp;
 
@@ -387,7 +385,6 @@ public:
 };
 
 class MontgomeryFriendlyMultiplier64 {
-
   std::uint64_t b;
 
 public:

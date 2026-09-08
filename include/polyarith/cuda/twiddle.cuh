@@ -21,7 +21,6 @@ namespace polyarith {
 namespace cuda {
 
 class NttForwardTwiddle16x16Coalesced {
-
   using multiplier_type = modular::MontgomeryFriendlyMultiplier64;
 
   struct {
@@ -75,7 +74,6 @@ public:
 };
 
 class NttForwardTwiddleWmma16x16 {
-
   using multiplier_type = modular::MontgomeryFriendlyMultiplier64;
 
   multiplier_type values[16][16];
@@ -124,7 +122,6 @@ public:
 };
 
 template <int n_> class NttForwardTwiddleIterativeCoalesced {
-
 public:
   static constexpr int n = n_;
 
@@ -194,7 +191,6 @@ public:
 };
 
 template <int n_> class NttForwardTwiddleIterativeWmma {
-
 public:
   static constexpr int n = n_;
 

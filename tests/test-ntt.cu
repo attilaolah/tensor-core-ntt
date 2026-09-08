@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright © 2026 Yukimasa Sugizaki
 
+#include <thrust/device_make_unique.h>
+#include <thrust/device_vector.h>
+#include <thrust/generate.h>
+#include <thrust/host_vector.h>
+
+#include <boost/icl/interval_set.hpp>
 #include <cstdint>
 #include <iostream>
 #include <random>
@@ -8,16 +14,8 @@
 #include <stdexcept>
 #include <type_traits>
 
-#include <boost/icl/interval_set.hpp>
-
-#include <thrust/device_make_unique.h>
-#include <thrust/device_vector.h>
-#include <thrust/generate.h>
-#include <thrust/host_vector.h>
-
-#include "polyarith/polyarith.cuh"
-
 #include "ntt-reference.hpp"
+#include "polyarith/polyarith.cuh"
 
 static boost::icl::interval_set<int>
 find_mismatches(const thrust::host_vector<std::uint64_t> &a,
@@ -48,7 +46,6 @@ find_mismatches(const thrust::host_vector<std::uint64_t> &a,
 namespace precomputation {
 
 template <int modulus_bits_> class ConstantPrecomputation {
-
 public:
   constexpr static int modulus_bits = modulus_bits_;
 
@@ -63,13 +60,12 @@ public:
   ConstantPrecomputation(const polyarith::Modulus &modulus)
 
       : modulus(modulus.get_modulus()),
-        friendly_reduction(modulus.get_modulus()){}
+        friendly_reduction(modulus.get_modulus()) {}
 };
 
 /* Warning: Do not allocate this on stack. */
 
 template <int modulus_bits_> class Precomputation {
-
 public:
   constexpr static int modulus_bits = modulus_bits_;
 
@@ -2588,4 +2584,5 @@ int test_ntt_main(const int argc, const char *const argv[]) {
                                               constant_precomp);
   test_forward_scalar_iterative_radix16_two24(modulus, precomp_ptr,
                                               constant_precomp);
+  return 0;
 }

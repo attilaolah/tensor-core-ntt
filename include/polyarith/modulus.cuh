@@ -9,7 +9,6 @@
 namespace polyarith {
 
 class Modulus {
-
   std::uint64_t modulus, generator;
 
 public:

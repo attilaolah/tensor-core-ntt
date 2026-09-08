@@ -1,4 +1,6 @@
 /*.sh
-/crunch
-/test-*
 /*.txt
+/.direnv/
+/crunch
+/result
+/test-*

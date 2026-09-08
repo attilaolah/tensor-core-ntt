@@ -7,6 +7,13 @@
 #include <string>
 #include <cassert>
 
+#include <random>
+#include <thread>
+#include <future>
+#include <mutex>
+#include <deque>
+#include <algorithm>
+
 #include <gmp.h>
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
@@ -303,25 +310,31 @@ void limbs_to_gmp(const std::vector<uint64_t>& limbs, mpz_t x, size_t N_val) {
     mpz_import(x, N_val, -1, sizeof(uint16_t), 0, 0, short_limbs.data());
 }
 
-void run_fermat_pipeline(
+bool run_fermat_pipeline(
     mpz_t p, size_t bit_len, size_t d, size_t N_val, uint64_t inv_n,
     const polyarith::Modulus& modulus,
     const precomputation::Precomputation<MODULUS_BITS>* precomp_device_ptr,
-    const precomputation::ConstantPrecomputation<MODULUS_BITS>& constant_precomp)
+    const precomputation::ConstantPrecomputation<MODULUS_BITS>& constant_precomp,
+    const std::vector<uint64_t>& h_P_in = std::vector<uint64_t>(),
+    const std::vector<uint64_t>& h_mu_in = std::vector<uint64_t>())
 {
-    // 1. Precompute mu = floor(B^(2*d) / P)
+    std::vector<uint64_t> h_P = h_P_in;
+    std::vector<uint64_t> h_mu = h_mu_in;
+    
     mpz_t B_2d, mu;
     mpz_init(B_2d);
     mpz_init(mu);
-    mpz_ui_pow_ui(B_2d, 2, 16 * 2 * d);
-    mpz_fdiv_q(mu, B_2d, p);
     
-    std::vector<uint64_t> h_P(N_val, 0);
-    std::vector<uint64_t> h_mu(N_val, 0);
+    if (h_P.empty() || h_mu.empty()) {
+        mpz_ui_pow_ui(B_2d, 2, 16 * 2 * d);
+        mpz_fdiv_q(mu, B_2d, p);
+        h_P.assign(N_val, 0);
+        h_mu.assign(N_val, 0);
+        gmp_to_limbs(p, h_P, N_val);
+        gmp_to_limbs(mu, h_mu, N_val);
+    }
+    
     std::vector<uint64_t> h_x(N_val, 0);
-    
-    gmp_to_limbs(p, h_P, N_val);
-    gmp_to_limbs(mu, h_mu, N_val);
     
     mpz_t x;
     mpz_init_set_ui(x, 2); // Base 2
@@ -440,10 +453,12 @@ void run_fermat_pipeline(
     
     float total_sec = ms / 1000.0f;
     float avg_us = ms * 1000.0f / squarings;
+    bool is_prime = false;
     if (mpz_cmp_ui(final_val, 1) == 0) {
         size_t exact_digits = mpz_sizeinbase(p, 10);
         size_t exact_bits = mpz_sizeinbase(p, 2);
         std::cout << "[PASS] Prime: " << exact_digits << " digits (" << exact_bits << " bits) | Total Time: " << total_sec << " s | Avg per step: " << avg_us << " us" << std::endl;
+        is_prime = true;
     } else {
         std::cout << "  [FAIL] Final x != 1" << std::endl;
     }
@@ -455,6 +470,78 @@ void run_fermat_pipeline(
     cudaGraphExecDestroy(instance);
     cudaGraphDestroy(graph);
     cudaStreamDestroy(stream);
+    
+    return is_prime;
+}
+
+
+struct Candidate {
+    mpz_t p;
+    size_t bit_len;
+    size_t d;
+    size_t N_val;
+    uint64_t q_val;
+    std::vector<uint64_t> h_P;
+    std::vector<uint64_t> h_mu;
+    
+    Candidate() {
+        mpz_init(p);
+    }
+    
+    Candidate(const Candidate& other) {
+        mpz_init_set(p, other.p);
+        bit_len = other.bit_len;
+        d = other.d;
+        N_val = other.N_val;
+        q_val = other.q_val;
+        h_P = other.h_P;
+        h_mu = other.h_mu;
+    }
+    
+    Candidate& operator=(const Candidate& other) {
+        if (this != &other) {
+            mpz_set(p, other.p);
+            bit_len = other.bit_len;
+            d = other.d;
+            N_val = other.N_val;
+            q_val = other.q_val;
+            h_P = other.h_P;
+            h_mu = other.h_mu;
+        }
+        return *this;
+    }
+    
+    ~Candidate() {
+        mpz_clear(p);
+    }
+};
+
+Candidate prepare_next_candidate(mpz_t K, const std::vector<uint64_t>& sieve_primes, std::mt19937_64& rng) {
+    Candidate c;
+    std::uniform_int_distribution<size_t> dist(0, sieve_primes.size() - 1);
+    c.q_val = sieve_primes[dist(rng)];
+    
+    mpz_mul_ui(c.p, K, c.q_val);
+    
+    c.bit_len = mpz_sizeinbase(c.p, 2);
+    c.d = (c.bit_len + 15) / 16;
+    if (c.bit_len <= 32000) c.N_val = 4096;
+    else c.N_val = 65536;
+    
+    mpz_t B_2d, mu;
+    mpz_init(B_2d);
+    mpz_init(mu);
+    mpz_ui_pow_ui(B_2d, 2, 16 * 2 * c.d);
+    mpz_fdiv_q(mu, B_2d, c.p);
+    
+    c.h_P.assign(c.N_val, 0);
+    c.h_mu.assign(c.N_val, 0);
+    gmp_to_limbs(c.p, c.h_P, c.N_val);
+    gmp_to_limbs(mu, c.h_mu, c.N_val);
+    
+    mpz_clear(B_2d);
+    mpz_clear(mu);
+    return c;
 }
 
 // -------------------------------------------------------------------------
@@ -481,13 +568,84 @@ int main(int argc, char** argv) {
     size_t target_bits = 258000;
     int target_index = -1;
     
+    std::string primes_file_name = "";
+    std::string sieve_file_name = "";
+    bool is_crunch = false;
+    
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--file" && i+1 < argc) filename = argv[++i];
         if (arg == "--phase" && i+1 < argc) phase = std::stoi(argv[++i]);
         if (arg == "--target-bits" && i+1 < argc) target_bits = std::stoull(argv[++i]);
         if (arg == "--index" && i+1 < argc) target_index = std::stoi(argv[++i]);
+        if (arg == "--primes" && i+1 < argc) { primes_file_name = argv[++i]; is_crunch = true; }
+        if (arg == "--sieve" && i+1 < argc) { sieve_file_name = argv[++i]; is_crunch = true; }
     }
+    
+    if (is_crunch) {
+        std::cout << "--- Crunch Mode ---" << std::endl;
+        std::vector<std::string> p_strs;
+        std::ifstream pf(primes_file_name);
+        std::string line;
+        while (std::getline(pf, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            p_strs.push_back(line);
+        }
+        // sort by length
+        std::sort(p_strs.begin(), p_strs.end(), [](const std::string& a, const std::string& b) {
+            return a.length() < b.length();
+        });
+        
+        mpz_t P_A, P_B, P_C, K;
+        mpz_init_set_str(P_A, p_strs[p_strs.size()-1].c_str(), 10);
+        mpz_init_set_str(P_B, p_strs[p_strs.size()-2].c_str(), 10);
+        mpz_init_set_str(P_C, p_strs[p_strs.size()-3].c_str(), 10);
+        
+        mpz_init(K);
+        mpz_mul(K, P_A, P_B);
+        mpz_mul(K, K, P_C);
+        mpz_mul_ui(K, K, 2);
+        
+        std::vector<uint64_t> sieve_primes;
+        std::ifstream sf(sieve_file_name);
+        while (std::getline(sf, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            sieve_primes.push_back(std::stoull(line));
+        }
+        std::cout << "Loaded " << sieve_primes.size() << " sieve primes." << std::endl;
+        
+        std::random_device rd;
+        std::mt19937_64 rng(rd());
+        
+        // Double buffering using future
+        std::future<Candidate> next_cand_future = std::async(std::launch::async, prepare_next_candidate, K, std::ref(sieve_primes), std::ref(rng));
+        
+        while(true) {
+            Candidate cand = next_cand_future.get();
+            // start preparing the next one immediately
+            next_cand_future = std::async(std::launch::async, prepare_next_candidate, K, std::ref(sieve_primes), std::ref(rng));
+            
+            auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            std::cout << "\n[" << std::put_time(std::localtime(&now), "%Y-%m-%d %H:%M:%S") << "] " 
+                      << "Testing candidate with q=" << cand.q_val << " (" << cand.bit_len << " bits)" << std::endl;
+            
+            uint64_t inv_n = modulus.invert(cand.N_val);
+            bool passed = run_fermat_pipeline(cand.p, cand.bit_len, cand.d, cand.N_val, inv_n, modulus, thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, cand.h_P, cand.h_mu);
+            
+            if (passed) {
+                std::cout << "*** FOUND PROBABLE PRIME! ***" << std::endl;
+                std::ofstream outf("found_primes.txt", std::ios::app);
+                outf << "q=" << cand.q_val << " P=";
+                char* p_str = mpz_get_str(NULL, 10, cand.p);
+                outf << p_str << std::endl;
+                free(p_str);
+            }
+        }
+        
+        mpz_clear(P_A); mpz_clear(P_B); mpz_clear(P_C); mpz_clear(K);
+        return 0;
+    }
+
     
     if (phase == 2) {
         std::cout << "--- Phase 2: Full Fermat Primality ---" << std::endl;

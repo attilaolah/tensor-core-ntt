@@ -14,6 +14,7 @@
 
 // Include everything from test-ntt to reuse kernels and precomputation structs
 #include "test-ntt.cu"
+#include "barrett_kernels.cuh"
 
 // -------------------------------------------------------------------------
 // Constants and Primitives
@@ -43,15 +44,19 @@ __global__ void bit_reverse_permute(uint64_t* data, size_t n, int shift) {
 
 __global__ void reverse_and_scale(uint64_t* data, uint64_t inv_n, uint64_t modulus_val, size_t n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx > 0 && idx < n / 2) {
+    if (idx == 0) {
+        unsigned __int128 p = (unsigned __int128)data[0] * inv_n;
+        data[0] = p % modulus_val;
+    } else if (idx < n / 2) {
         size_t opp = n - idx;
-        uint64_t tmp = data[idx];
-        data[idx] = data[opp];
-        data[opp] = tmp;
-    }
-    if (idx < n) {
-        unsigned __int128 p = (unsigned __int128)data[idx] * inv_n;
-        data[idx] = p % modulus_val;
+        uint64_t val_idx = data[idx];
+        uint64_t val_opp = data[opp];
+        
+        unsigned __int128 p1 = (unsigned __int128)val_opp * inv_n;
+        unsigned __int128 p2 = (unsigned __int128)val_idx * inv_n;
+        
+        data[idx] = p1 % modulus_val;
+        data[opp] = p2 % modulus_val;
     }
 }
 
@@ -150,7 +155,11 @@ bool read_prime(const char* file, size_t target_bits, size_t tolerance, mpz_t ou
 void gmp_to_limbs(mpz_t x, std::vector<uint64_t>& limbs) {
     limbs.assign(N, 0);
     size_t count;
-    mpz_export(limbs.data(), &count, -1, sizeof(uint16_t), 0, 0, x);
+    std::vector<uint16_t> temp(N, 0);
+    mpz_export(temp.data(), &count, -1, sizeof(uint16_t), 0, 0, x);
+    for (size_t i = 0; i < count; ++i) {
+        limbs[i] = temp[i];
+    }
 }
 
 // Convert base 2^16 limbs to GMP
@@ -252,8 +261,118 @@ int main(int argc, char** argv) {
         }
     } else {
         std::cout << "--- Phase 2: Full Fermat Primality ---" << std::endl;
-        // Not fully implemented Barrett loop here due to complexity, but struct is complete.
-        std::cout << "Barrett implementation requires rigorous boundary checks not yet finalized." << std::endl;
+        if (!read_prime(filename.c_str(), target_digits * 3.321928, 500000, p)) {
+            std::cout << "Could not read prime for Phase 2!" << std::endl;
+            return 1;
+        }
+        
+        size_t d = (mpz_sizeinbase(p, 2) + 15) / 16;
+        std::cout << "Prime length: " << mpz_sizeinbase(p, 2) << " bits (" << d << " limbs of 16-bits)." << std::endl;
+        
+        // 1. Precompute mu = floor(B^(2*d) / P)
+        mpz_t B_2d, mu;
+        mpz_init(B_2d);
+        mpz_init(mu);
+        mpz_ui_pow_ui(B_2d, 2, 16 * 2 * d);
+        mpz_fdiv_q(mu, B_2d, p);
+        
+        // 2. Transfer P and mu to GPU
+        std::vector<uint64_t> h_p(N, 0), h_mu(N, 0);
+        gmp_to_limbs(p, h_p);
+        gmp_to_limbs(mu, h_mu);
+        
+        thrust::device_vector<uint64_t> d_P = h_p;
+        thrust::device_vector<uint64_t> d_mu = h_mu;
+        
+        cudaStream_t stream;
+        cudaStreamCreate(&stream);
+        
+        // Pre-transform P and mu into bit-reversed frequency domain
+        thrust::device_vector<uint64_t> d_P_freq = d_P;
+        launch_forward_ntt_65536(thrust::raw_pointer_cast(d_P_freq.data()), thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, stream);
+        
+        thrust::device_vector<uint64_t> d_mu_freq = d_mu;
+        launch_forward_ntt_65536(thrust::raw_pointer_cast(d_mu_freq.data()), thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, stream);
+        
+        // Set up working buffers
+        thrust::device_vector<uint64_t> d_X(N, 0);
+        mpz_t x_init;
+        mpz_init_set_ui(x_init, 2);
+        std::vector<uint64_t> h_X(N, 0);
+        gmp_to_limbs(x_init, h_X);
+        d_X = h_X;
+        
+        thrust::device_vector<uint64_t> d_T(N, 0);
+        thrust::device_vector<uint64_t> d_Z1(N, 0);
+        thrust::device_vector<uint64_t> d_Q(N, 0);
+        thrust::device_vector<uint64_t> d_Z2(N, 0);
+        
+        int threads = 256;
+        int blocks = (N + threads - 1) / threads;
+        
+        size_t loop_count = mpz_sizeinbase(p, 2) - 1;
+        std::cout << "Running " << loop_count << " repeated squarings on GPU..." << std::endl;
+        
+        auto start_time = std::chrono::high_resolution_clock::now();
+        
+        for (size_t step = 0; step < loop_count; ++step) {
+            // T = X^2
+            uint64_t* raw_X = thrust::raw_pointer_cast(d_X.data());
+            uint64_t* raw_T = thrust::raw_pointer_cast(d_T.data());
+            cudaMemcpyAsync(raw_T, raw_X, N * sizeof(uint64_t), cudaMemcpyDeviceToDevice, stream);
+            launch_forward_ntt_65536(raw_T, thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, stream);
+            pointwise_multiply_scaled<<<blocks, threads, 0, stream>>>(raw_T, raw_T, raw_T, inv_n, modulus.get_modulus(), N);
+            bit_reverse_permute<<<blocks, threads, 0, stream>>>(raw_T, N, 16);
+            launch_forward_ntt_65536(raw_T, thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, stream);
+            bit_reverse_permute<<<blocks, threads, 0, stream>>>(raw_T, N, 16);
+            reverse_and_scale<<<blocks, threads, 0, stream>>>(raw_T, inv_n, modulus.get_modulus(), N);
+            resolve_carries<<<1, 1, 0, stream>>>(raw_T, N);
+            
+            // Z1 = T * mu (T is currently in raw_T).
+            // But wait! T has been mutated. It is natural time.
+            uint64_t* raw_Z1 = thrust::raw_pointer_cast(d_Z1.data());
+            uint64_t* raw_mu_freq = thrust::raw_pointer_cast(d_mu_freq.data());
+            cudaMemcpyAsync(raw_Z1, raw_T, N * sizeof(uint64_t), cudaMemcpyDeviceToDevice, stream);
+            launch_forward_ntt_65536(raw_Z1, thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, stream);
+            // Now raw_Z1 is T_freq (bit-reversed).
+            pointwise_multiply_scaled<<<blocks, threads, 0, stream>>>(raw_Z1, raw_Z1, raw_mu_freq, inv_n, modulus.get_modulus(), N);
+            bit_reverse_permute<<<blocks, threads, 0, stream>>>(raw_Z1, N, 16);
+            launch_forward_ntt_65536(raw_Z1, thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, stream);
+            bit_reverse_permute<<<blocks, threads, 0, stream>>>(raw_Z1, N, 16);
+            reverse_and_scale<<<blocks, threads, 0, stream>>>(raw_Z1, inv_n, modulus.get_modulus(), N);
+            resolve_carries<<<1, 1, 0, stream>>>(raw_Z1, N);
+            
+            // Q = Z1 >> 2d
+            uint64_t* raw_Q = thrust::raw_pointer_cast(d_Q.data());
+            shift_right_kernel<<<blocks, threads, 0, stream>>>(raw_Q, raw_Z1, 2 * d, N);
+            
+            // Z2 = Q * P
+            uint64_t* raw_Z2 = thrust::raw_pointer_cast(d_Z2.data());
+            uint64_t* raw_P_freq = thrust::raw_pointer_cast(d_P_freq.data());
+            cudaMemcpyAsync(raw_Z2, raw_Q, N * sizeof(uint64_t), cudaMemcpyDeviceToDevice, stream);
+            launch_forward_ntt_65536(raw_Z2, thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, stream);
+            // raw_Z2 is Q_freq (bit-reversed). P_freq is also bit-reversed.
+            pointwise_multiply_scaled<<<blocks, threads, 0, stream>>>(raw_Z2, raw_Z2, raw_P_freq, inv_n, modulus.get_modulus(), N);
+            bit_reverse_permute<<<blocks, threads, 0, stream>>>(raw_Z2, N, 16);
+            launch_forward_ntt_65536(raw_Z2, thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, stream);
+            bit_reverse_permute<<<blocks, threads, 0, stream>>>(raw_Z2, N, 16);
+            reverse_and_scale<<<blocks, threads, 0, stream>>>(raw_Z2, inv_n, modulus.get_modulus(), N);
+            resolve_carries<<<1, 1, 0, stream>>>(raw_Z2, N);
+            
+            // R = T - Z2
+            sub_kernel_and_resolve<<<1, 1, 0, stream>>>(raw_X, raw_T, raw_Z2, N);
+            
+            // While R >= P, R = R - P
+            uint64_t* raw_P = thrust::raw_pointer_cast(d_P.data());
+            compare_and_sub_p_kernel<<<1, 1, 0, stream>>>(raw_X, raw_P, d, N);
+        }
+        
+        cudaStreamSynchronize(stream);
+        auto end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
+        
+        std::cout << "GPU Time: " << elapsed.count() << " ms for " << loop_count << " steps." << std::endl;
+        std::cout << "Finished!" << std::endl;
     }
     
     return 0;

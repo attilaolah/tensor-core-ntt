@@ -1,3 +1,4 @@
+#include <iomanip>
 // test-fermat.cu
 #include <cuda_runtime.h>
 #include <gmp.h>
@@ -345,7 +346,8 @@ auto run_fermat_pipeline(
     const precomputation::ConstantPrecomputation<MODULUS_BITS>
         &constant_precomp,
     const std::vector<uint64_t> &h_P_in = std::vector<uint64_t>(),
-    const std::vector<uint64_t> &h_mu_in = std::vector<uint64_t>()) -> bool {
+    const std::vector<uint64_t> &h_mu_in = std::vector<uint64_t>(),
+    const std::string& prefix_string = "") -> bool {
   std::vector<uint64_t> h_P = h_P_in;
   std::vector<uint64_t> h_mu = h_mu_in;
 
@@ -482,11 +484,16 @@ auto run_fermat_pipeline(
       multiplies++;
     }
 
-    if (squarings % twenty_percent == 0) {
+    int one_percent = std::max<int>(1, total_steps / 100);
+    if (squarings % one_percent == 0 || squarings == total_steps) {
       cudaStreamSynchronize(stream);
-      std::cout << "Progress: " << (squarings * 100 / total_steps) << "% ("
-                << squarings << "/" << total_steps << " squarings)"
-                << '\n';
+      int pct = (squarings * 100) / total_steps;
+      if (prefix_string.empty()) {
+        std::cout << "\rProgress: " << pct << "% (" << squarings << "/" << total_steps << " squarings)" << std::flush;
+      } else {
+        std::cout << "\r" << prefix_string << " | SQ " << total_steps << " : "
+                  << std::setw(6) << squarings << " | " << std::setw(3) << pct << "%" << std::flush;
+      }
     }
   }
 
@@ -715,18 +722,16 @@ auto main(int argc, char **argv) -> int {
 
       auto now = std::chrono::system_clock::to_time_t(
           std::chrono::system_clock::now());
-      std::cout << "\n";
-      std::cout << "================================================================\n";
-      std::cout << "[" << std::put_time(std::localtime(&now), "%Y-%m-%d %H:%M:%S") << "]\n";
-      std::cout << ">>> TESTING CANDIDATE WITH q = " << cand.q_val << " <<<\n";
-      std::cout << "    Bit length: " << cand.bit_len << " bits\n";
-      std::cout << "================================================================\n";
+      std::stringstream ss;
+      ss << "[" << std::put_time(std::localtime(&now), "%H:%M:%S") << "] Q " 
+         << cand.q_val << " (" << cand.bit_len << " bits)";
+      std::string prefix = ss.str();
 
       uint64_t inv_n = modulus.invert(cand.N_val);
       bool passed = run_fermat_pipeline(
           cand.p, cand.bit_len, cand.d, cand.N_val, inv_n, modulus,
           thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
-          cand.h_P, cand.h_mu);
+          cand.h_P, cand.h_mu, prefix);
 
       if (passed) {
         std::cout << "*** FOUND PROBABLE PRIME! ***" << '\n';

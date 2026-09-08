@@ -60,76 +60,82 @@ __global__ void reverse_and_scale(uint64_t* data, uint64_t inv_n, uint64_t modul
     }
 }
 
-__global__ void resolve_carries_bulk(uint64_t* data, size_t n, int* d_changed) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        uint64_t val = data[idx];
-        uint64_t carry = val >> 16;
-        if (carry > 0) {
-            atomicAdd((unsigned long long*)&data[idx], -(unsigned long long)(carry << 16));
-            if (idx + 1 < n) {
-                atomicAdd((unsigned long long*)&data[idx + 1], (unsigned long long)carry);
-                if (d_changed) *d_changed = 1;
-            }
-        }
+__global__ void parallel_resolve_carries(uint64_t* data, size_t n) {
+    __shared__ uint64_t smem[4096];
+    int tid = threadIdx.x;
+    for(int i=0; i<4; ++i) {
+        smem[tid + i*1024] = data[tid + i*1024];
     }
-}
-
-__global__ void resolve_carries_sweep(uint64_t* data, size_t n) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        uint64_t carry = 0;
-        for (size_t i = 0; i < n; ++i) {
-            uint64_t val = data[i] + carry;
-            carry = val >> 16;
-            uint64_t rem = val & 0xFFFF;
-            if (data[i] != rem) {
-                data[i] = rem;
+    __syncthreads();
+    
+    int changed = 1;
+    while(changed) {
+        changed = 0;
+        for(int i=0; i<4; ++i) {
+            int idx = tid + i*1024;
+            uint64_t val = smem[idx];
+            uint64_t carry = val >> 16;
+            if (carry > 0) {
+                changed = 1;
+                atomicAdd((unsigned long long*)&smem[idx], -(unsigned long long)(carry << 16));
+                if (idx + 1 < 4096) {
+                    atomicAdd((unsigned long long*)&smem[idx + 1], (unsigned long long)carry);
+                }
             }
         }
+        changed = __syncthreads_or(changed);
+    }
+    
+    for(int i=0; i<4; ++i) {
+        data[tid + i*1024] = smem[tid + i*1024];
     }
 }
 
 void launch_resolve_carries(uint64_t* d_data, size_t n, cudaStream_t stream) {
-    int threads = 256;
-    int blocks = (n + threads - 1) / threads;
-    // 3 passes reduces multi-limb carries to almost zero
-    for (int i = 0; i < 3; ++i) {
-        resolve_carries_bulk<<<blocks, threads, 0, stream>>>(d_data, n, nullptr);
-    }
-    // Single thread sweep guarantees exact mathematical resolution for any tiny cascades
-    resolve_carries_sweep<<<1, 1, 0, stream>>>(d_data, n);
+    parallel_resolve_carries<<<1, 1024, 0, stream>>>(d_data, n);
 }
 
-__global__ void sub_kernel_bulk(int64_t* r, const uint64_t* t, const uint64_t* z2, size_t n) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        r[idx] = (int64_t)t[idx] - (int64_t)z2[idx];
+__global__ void parallel_sub_kernel(uint64_t* r, const uint64_t* t, const uint64_t* z2, size_t n) {
+    __shared__ uint64_t s_r[4096];
+    int tid = threadIdx.x;
+    for(int i=0; i<4; ++i) {
+        int idx = tid + i*1024;
+        int64_t diff = (int64_t)t[idx] - (int64_t)z2[idx];
+        s_r[idx] = (uint64_t)diff;
     }
-}
-
-__global__ void sub_kernel_sweep(int64_t* r, size_t n) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        int64_t borrow = 0;
-        for (size_t i = 0; i < n; ++i) {
-            int64_t diff = r[i] - borrow;
-            if (diff < 0) {
-                diff += 65536;
-                borrow = 1;
-            } else {
-                borrow = 0;
-            }
-            if (r[i] != diff) {
-                r[i] = diff;
+    __syncthreads();
+    
+    int changed = 1;
+    while(changed) {
+        changed = 0;
+        for(int i=0; i<4; ++i) {
+            int idx = tid + i*1024;
+            int64_t val = (int64_t)s_r[idx];
+            if (val < 0) {
+                changed = 1;
+                atomicAdd((unsigned long long*)&s_r[idx], 65536ULL);
+                if (idx + 1 < n) {
+                    atomicAdd((unsigned long long*)&s_r[idx + 1], -1ULL);
+                }
+            } else if (val >= 65536) {
+                changed = 1;
+                uint64_t carry = val >> 16;
+                atomicAdd((unsigned long long*)&s_r[idx], -(unsigned long long)(carry << 16));
+                if (idx + 1 < n) {
+                    atomicAdd((unsigned long long*)&s_r[idx + 1], carry);
+                }
             }
         }
+        changed = __syncthreads_or(changed);
+    }
+    
+    for(int i=0; i<4; ++i) {
+        r[tid + i*1024] = s_r[tid + i*1024];
     }
 }
 
 void launch_sub_kernel(uint64_t* r, const uint64_t* t, const uint64_t* z2, size_t n, cudaStream_t stream) {
-    int threads = 256;
-    int blocks = (n + threads - 1) / threads;
-    sub_kernel_bulk<<<blocks, threads, 0, stream>>>((int64_t*)r, t, z2, n);
-    sub_kernel_sweep<<<1, 1, 0, stream>>>((int64_t*)r, n);
+    parallel_sub_kernel<<<1, 1024, 0, stream>>>(r, t, z2, n);
 }
 
 // -------------------------------------------------------------------------
@@ -362,12 +368,13 @@ int main(int argc, char** argv) {
         size_t loop_count = mpz_sizeinbase(p, 2) - 1;
         std::cout << "Running " << loop_count << " repeated squarings on GPU..." << std::endl;
         
-        auto start_time = std::chrono::high_resolution_clock::now();
+        auto pre_time = std::chrono::high_resolution_clock::now();
         
-        for (size_t step = 0; step < loop_count; ++step) {
-            if (step % 100 == 0) {
-                std::cout << "Step " << step << " / " << loop_count << std::endl;
-            }
+        cudaGraph_t graph;
+        cudaGraphExec_t instance;
+        cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+        
+        for (size_t step = 0; step < 1; ++step) {
             // T = X^2
             uint64_t* raw_X = thrust::raw_pointer_cast(d_X.data());
             uint64_t* raw_T = thrust::raw_pointer_cast(d_T.data());
@@ -404,30 +411,23 @@ int main(int argc, char** argv) {
             
             // R = T - Z2
             launch_sub_kernel(raw_X, raw_T, raw_Z2, N, stream);
-            cudaStreamSynchronize(stream);
             
-            // While R >= P, R = R - P
+            // Unrolled max 2 subtractions entirely on device
             uint64_t* raw_P = thrust::raw_pointer_cast(d_P.data());
-            int geq_loops = 0;
-            thrust::device_vector<int> d_geq(1, 0);
-            while (true) {
-                compare_and_sub_p_kernel<<<1, 1, 0, stream>>>(raw_X, raw_P, d, N, thrust::raw_pointer_cast(d_geq.data()));
-                cudaStreamSynchronize(stream);
-                if (d_geq[0] == 0) break;
-                
-                geq_loops++;
-                if (geq_loops > 100) {
-                    std::cout << "HANG DETECTED AT STEP " << step << "!" << std::endl;
-                    thrust::host_vector<uint64_t> h_r(N);
-                    cudaMemcpy(h_r.data(), raw_X, N * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-                    std::cout << "R upper limbs: ";
-                    for(int i=N-1; i>=N-10; i--) std::cout << h_r[i] << " ";
-                    std::cout << "... [d=" << d << "] ... ";
-                    for(int i=d+5; i>=d-5; i--) std::cout << h_r[i] << " ";
-                    std::cout << std::endl;
-                    break;
-                }
+            parallel_conditional_sub_p_kernel<<<1, 1024, 0, stream>>>(raw_X, raw_P, d, N);
+        }
+        cudaStreamEndCapture(stream, &graph);
+        
+        cudaGraphInstantiate(&instance, graph, NULL, NULL, 0);
+        std::cout << "CUDA Graph captured and instantiated successfully." << std::endl;
+        
+        auto start_time = std::chrono::high_resolution_clock::now();
+        
+        for (size_t step = 0; step < loop_count; ++step) {
+            if (step % 1000 == 0) {
+                std::cout << "Step " << step << " / " << loop_count << std::endl;
             }
+            cudaGraphLaunch(instance, stream);
         }
         
         cudaStreamSynchronize(stream);

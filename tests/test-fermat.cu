@@ -630,6 +630,13 @@ auto main(int argc, char **argv) -> int {
   std::string sieve_file_name = "";
   bool is_crunch = false;
 
+  // Default to crunch mode if no arguments are provided
+  if (argc == 1) {
+    is_crunch = true;
+    primes_file_name = "primes.txt";
+    sieve_file_name = "sieve_1e10.txt";
+  }
+
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
     if (arg == "--file" && i + 1 < argc) {
@@ -708,11 +715,12 @@ auto main(int argc, char **argv) -> int {
 
       auto now = std::chrono::system_clock::to_time_t(
           std::chrono::system_clock::now());
-      std::cout << "\n["
-                << std::put_time(std::localtime(&now), "%Y-%m-%d %H:%M:%S")
-                << "] "
-                << "Testing candidate with q=" << cand.q_val << " ("
-                << cand.bit_len << " bits)" << '\n';
+      std::cout << "\n";
+      std::cout << "================================================================\n";
+      std::cout << "[" << std::put_time(std::localtime(&now), "%Y-%m-%d %H:%M:%S") << "]\n";
+      std::cout << ">>> TESTING CANDIDATE WITH q = " << cand.q_val << " <<<\n";
+      std::cout << "    Bit length: " << cand.bit_len << " bits\n";
+      std::cout << "================================================================\n";
 
       uint64_t inv_n = modulus.invert(cand.N_val);
       bool passed = run_fermat_pipeline(

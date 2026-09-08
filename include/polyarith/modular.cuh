@@ -10,12 +10,12 @@
 
 #include "arithmetic.cuh"
 
-namespace polyarith {
 
-namespace modular {
 
-static __host__ __device__ std::uint32_t
-calculate_montgomery_inverse(const std::uint32_t modulus) {
+namespace polyarith::modular {
+
+static __host__ __device__ auto
+calculate_montgomery_inverse(const std::uint32_t modulus) -> std::uint32_t {
   std::uint32_t num, den, t;
   num = (modulus * 3) ^ 2; /* 5 */
   den = num * modulus;
@@ -34,8 +34,8 @@ calculate_montgomery_inverse(const std::uint32_t modulus) {
   return num;
 }
 
-static __host__ __device__ std::uint64_t
-calculate_montgomery_inverse(const std::uint64_t modulus) {
+static __host__ __device__ auto
+calculate_montgomery_inverse(const std::uint64_t modulus) -> std::uint64_t {
   const std::uint32_t inverse =
       calculate_montgomery_inverse(static_cast<std::uint32_t>(modulus));
   return inverse * (2 - modulus * inverse); /* 32 -> 64 */
@@ -46,9 +46,9 @@ public:
   constexpr static int modulus_bits = modulus_bits_;
 
 private:
-  __device__ std::uint64_t normalize(const std::uint64_t u,
-                                     const std::uint64_t modulus) const {
-    const std::uint32_t N1 = static_cast<std::uint32_t>(modulus >> 32);
+  __device__ auto normalize(const std::uint64_t u,
+                                     const std::uint64_t modulus) const -> std::uint64_t {
+    const auto N1 = static_cast<std::uint32_t>(modulus >> 32);
     if (static_cast<std::uint32_t>(u) >= 2 &&
         static_cast<std::uint32_t>(u >> 32) >= N1 * 2) {
       return u - modulus * 2;
@@ -60,10 +60,10 @@ private:
   }
 
   /* Up to 40 bits. */
-  __device__ std::uint64_t
+  __device__ auto
   reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
               const std::uint32_t t2, const std::uint32_t t3,
-              const std::uint32_t t4, const std::uint64_t modulus) const {
+              const std::uint32_t t4, const std::uint64_t modulus) const -> std::uint64_t {
     std::uint64_t u;
 
     asm("{\n\t\t"
@@ -111,11 +111,11 @@ private:
   }
 
   /* Up to 48 bits. */
-  __device__ std::uint64_t
+  __device__ auto
   reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
               const std::uint32_t t2, const std::uint32_t t3,
               const std::uint32_t t4, const std::uint32_t t5,
-              const std::uint64_t modulus) const {
+              const std::uint64_t modulus) const -> std::uint64_t {
     std::uint64_t u;
 
     asm("{\n\t\t"
@@ -175,11 +175,11 @@ private:
   }
 
   /* Up to 56 bits. */
-  __device__ std::uint64_t
+  __device__ auto
   reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
               const std::uint32_t t2, const std::uint32_t t3,
               const std::uint32_t t4, const std::uint32_t t5,
-              const std::uint32_t t6, const std::uint64_t modulus) const {
+              const std::uint32_t t6, const std::uint64_t modulus) const -> std::uint64_t {
     std::uint64_t u;
 
     asm("{\n\t\t"
@@ -242,12 +242,12 @@ private:
   }
 
   /* Up to 62 bits. */
-  __device__ std::uint64_t
+  __device__ auto
   reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
               const std::uint32_t t2, const std::uint32_t t3,
               const std::uint32_t t4, const std::uint32_t t5,
               const std::uint32_t t6, std::uint32_t t7,
-              const std::uint64_t modulus) const {
+              const std::uint64_t modulus) const -> std::uint64_t {
     std::uint64_t u;
 
     asm("{\n\t\t"
@@ -320,9 +320,9 @@ private:
   }
 
 public:
-  MontgomeryFriendlyReductionBy64(void) = default;
+  MontgomeryFriendlyReductionBy64() = default;
 
-  MontgomeryFriendlyReductionBy64(const std::uint64_t modulus) {
+  explicit MontgomeryFriendlyReductionBy64(const std::uint64_t modulus) {
     if (std::bit_width(modulus) >= 63) {
       throw std::runtime_error("modulus needs to be within 62 bits for now");
     } else if (static_cast<std::uint32_t>(modulus) != 1) {
@@ -335,7 +335,7 @@ public:
     }
   }
 
-  static __host__ __device__ int get_factor(void) {
+  static __host__ __device__ auto get_factor() -> int {
     if constexpr (modulus_bits <= 40) {
       return 32 * 2;
     } else if constexpr (modulus_bits <= 48) {
@@ -346,11 +346,11 @@ public:
     return 32 * 4;
   }
 
-  __device__ std::uint64_t
+  __device__ auto
   reduce(const std::uint32_t t0, const std::uint32_t t1, const std::uint32_t t2,
          const std::uint32_t t3, const std::uint32_t t4, const std::uint32_t t5,
          const std::uint32_t t6, std::uint32_t t7,
-         const std::uint64_t modulus) const {
+         const std::uint64_t modulus) const -> std::uint64_t {
     if constexpr (modulus_bits <= 40) {
       return reduce_impl(t0, t1, t2, t3, t4, modulus);
     } else if constexpr (modulus_bits <= 48) {
@@ -367,7 +367,7 @@ class MontgomeryMultiplier64 {
   std::uint64_t bp;
 
 public:
-  MontgomeryMultiplier64(void) = default;
+  MontgomeryMultiplier64() = default;
 
   MontgomeryMultiplier64(const std::uint64_t multiplier,
                          const std::uint64_t modulus) {
@@ -375,8 +375,8 @@ public:
     bp = b * calculate_montgomery_inverse(modulus);
   }
 
-  __host__ __device__ std::uint64_t multiply(const std::uint64_t a,
-                                             const std::uint64_t N) const {
+  __host__ __device__ auto multiply(const std::uint64_t a,
+                                             const std::uint64_t N) const -> std::uint64_t {
     const std::uint64_t ab1 = arithmetic::multiply_high(a, b);
     const std::uint64_t q = a * bp;
     const std::uint64_t qN1 = arithmetic::multiply_high(q, N);
@@ -388,7 +388,7 @@ class MontgomeryFriendlyMultiplier64 {
   std::uint64_t b;
 
 public:
-  MontgomeryFriendlyMultiplier64(void) = default;
+  MontgomeryFriendlyMultiplier64() = default;
 
   MontgomeryFriendlyMultiplier64(const std::uint64_t multiplier,
                                  const std::uint64_t modulus) {
@@ -401,10 +401,10 @@ public:
     b = arithmetic::multiply_wide(multiplier, -modulus) % modulus;
   }
 
-  __host__ __device__ std::uint64_t get_b(void) const { return b; }
+  __host__ __device__ auto get_b() const -> std::uint64_t { return b; }
 
-  __host__ __device__ std::uint64_t multiply(const std::uint64_t a,
-                                             const std::uint64_t N) const {
+  __host__ __device__ auto multiply(const std::uint64_t a,
+                                             const std::uint64_t N) const -> std::uint64_t {
     const std::uint32_t a0 = a;
     const std::uint32_t a1 = a >> 32;
     const std::uint32_t b0 = b;
@@ -412,7 +412,7 @@ public:
     const std::uint32_t N1 = N >> 32;
 
     std::uint64_t c;
-    c = arithmetic::multiply_wide(a0, b0) + (std::uint64_t(1) << 32);
+    c = arithmetic::multiply_wide(a0, b0) + (static_cast<std::uint64_t>(1) << 32);
     c = arithmetic::concatenate<std::uint32_t>(c >> 32, N1 + 1) -
         arithmetic::multiply_wide<std::uint32_t>(c, N1) +
         arithmetic::multiply_wide(a0, b1) + arithmetic::multiply_wide(a1, b0);
@@ -429,8 +429,8 @@ public:
   }
 };
 
-} // namespace modular
+} // namespace polyarith::modular
 
-} // namespace polyarith
+
 
 #endif /* POLYARITH_MODULAR_CUH_INCLUDED */

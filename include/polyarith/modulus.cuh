@@ -12,28 +12,28 @@ class Modulus {
   std::uint64_t modulus, generator;
 
 public:
-  Modulus(void) = default;
+  Modulus() = default;
 
-  Modulus(const std::uint64_t modulus, const std::uint64_t generator = {})
+  explicit Modulus(const std::uint64_t modulus, const std::uint64_t generator = {})
       : modulus(modulus), generator(generator) {}
 
-  std::uint64_t get_modulus(void) const { return modulus; }
+  [[nodiscard]] auto get_modulus() const -> std::uint64_t { return modulus; }
 
-  std::uint64_t get_generator(void) const { return generator; }
+  [[nodiscard]] auto get_generator() const -> std::uint64_t { return generator; }
 
-  std::uint64_t add(const std::uint64_t a, const std::uint64_t b) const {
+  [[nodiscard]] auto add(const std::uint64_t a, const std::uint64_t b) const -> std::uint64_t {
     return (a < modulus - b) ? (a + b) : (a + b - modulus);
   }
 
-  std::uint64_t subtract(const std::uint64_t a, const std::uint64_t b) const {
+  [[nodiscard]] auto subtract(const std::uint64_t a, const std::uint64_t b) const -> std::uint64_t {
     return (a >= b) ? (a - b) : (a - b + modulus);
   }
 
-  std::uint64_t multiply(const std::uint64_t a, const std::uint64_t b) const {
+  [[nodiscard]] auto multiply(const std::uint64_t a, const std::uint64_t b) const -> std::uint64_t {
     return a * static_cast<unsigned __int128>(b) % modulus;
   }
 
-  std::uint64_t power(std::uint64_t a, std::int64_t e) const {
+  [[nodiscard]] auto power(std::uint64_t a, std::int64_t e) const -> std::uint64_t {
     if (e < 0) {
       return power(a, Modulus(modulus - 1).multiply(modulus - 2, -e));
     }
@@ -48,17 +48,17 @@ public:
     return b;
   }
 
-  std::uint64_t invert(const std::uint64_t a) const {
+  [[nodiscard]] auto invert(const std::uint64_t a) const -> std::uint64_t {
     return power(a, modulus - 2);
   }
 
   /* Note: Assuming the specified root exists. */
-  std::uint64_t get_root_forward(const std::uint64_t order) const {
+  [[nodiscard]] auto get_root_forward(const std::uint64_t order) const -> std::uint64_t {
     return power(generator, (modulus - 1) / order);
   }
 
   /* Note: Assuming the specified root exists. */
-  std::uint64_t get_root_inverse(const std::uint64_t order) const {
+  [[nodiscard]] auto get_root_inverse(const std::uint64_t order) const -> std::uint64_t {
     return power(
         generator,
         Modulus(modulus - 1).multiply((modulus - 1) / order, modulus - 2));

@@ -14,7 +14,7 @@ public:
   static constexpr int den = den_;
 
   template <class value_type>
-  static __host__ __device__ value_type multiply_floor(const value_type value) {
+  static __host__ __device__ auto multiply_floor(const value_type value) -> value_type {
     return value * num / den;
   }
 };

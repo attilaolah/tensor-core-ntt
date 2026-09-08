@@ -4,16 +4,16 @@
 #ifndef POLYARITH_CUDA_THREAD_CUH_INCLUDED
 #define POLYARITH_CUDA_THREAD_CUH_INCLUDED
 
-namespace polyarith {
 
-namespace cuda {
 
-template <class T> static __device__ T uniform_hint(const T value) {
+namespace polyarith::cuda {
+
+template <class T> static __device__ auto uniform_hint(const T value) -> T {
   return __shfl_sync(UINT32_C(0xffff'ffff), value, 0);
 }
 
 [[maybe_unused]]
-static __device__ int get_laneId(void) {
+static __device__ auto get_laneId() -> int {
   int laneId;
   asm("mov.u32 %0, %laneid;" : "=r"(laneId));
   return laneId;
@@ -21,7 +21,7 @@ static __device__ int get_laneId(void) {
 
 template <int dimensions>
 [[maybe_unused]]
-static __device__ int get_warpId(void)
+static __device__ auto get_warpId() -> int
   requires(dimensions == 1)
 {
   return uniform_hint(threadIdx.x / 32);
@@ -29,7 +29,7 @@ static __device__ int get_warpId(void)
 
 template <int dimensions>
 [[maybe_unused]]
-static __device__ int get_warpId(void)
+static __device__ auto get_warpId() -> int
   requires(dimensions == 2)
 {
   return uniform_hint((threadIdx.x + blockDim.x * threadIdx.y) / 32);
@@ -37,7 +37,7 @@ static __device__ int get_warpId(void)
 
 template <int dimensions>
 [[maybe_unused]]
-static __device__ int get_warpId(void)
+static __device__ auto get_warpId() -> int
   requires(dimensions == 3)
 {
   return uniform_hint(
@@ -46,14 +46,14 @@ static __device__ int get_warpId(void)
 }
 
 [[maybe_unused]]
-static __device__ int get_nWarpId(void) {
+static __device__ auto get_nWarpId() -> int {
   int nWarpId;
   asm("mov.u32 %0, %nwarpid;" : "=r"(nWarpId));
   return nWarpId;
 }
 
-} // namespace cuda
+} // namespace polyarith::cuda
 
-} // namespace polyarith
+
 
 #endif /* POLYARITH_CUDA_THREAD_CUH_INCLUDED */

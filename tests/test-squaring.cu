@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iostream>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 #include "polyarith/polyarith.cuh"
@@ -14,11 +15,11 @@
 __global__ void pointwise_square_scaled(uint64_t *data, uint64_t inv_n,
                                         uint64_t modulus_val, size_t n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < n) {
+  if (std::cmp_less(idx , n)) {
     uint64_t val = data[idx];
-    unsigned __int128 p1 = (unsigned __int128)val * val;
+    unsigned __int128 p1 = static_cast<unsigned __int128>(val) * val;
     val = p1 % modulus_val;
-    unsigned __int128 p2 = (unsigned __int128)val * inv_n;
+    unsigned __int128 p2 = static_cast<unsigned __int128>(val) * inv_n;
     data[idx] = p2 % modulus_val;
   }
 }
@@ -67,7 +68,7 @@ modulus, reduction);
 }
 */
 
-int main() {
+auto main() -> int {
   constexpr size_t N = 32768; // 2^15
   const polyarith::Modulus modulus(UINT64_C(0x1fff'fff9'0000'0001), 3);
   constexpr int modulus_bits = 64;
@@ -105,7 +106,7 @@ int main() {
   // 6. Copy back and verify
   h_data = d_data;
   std::cout << "Squaring and carry resolution completed successfully!"
-            << std::endl;
+            << '\n';
 
   return 0;
 }

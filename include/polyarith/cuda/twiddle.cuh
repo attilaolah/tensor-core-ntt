@@ -16,9 +16,9 @@
 #include "matrix.cuh"
 #include "thread.cuh"
 
-namespace polyarith {
 
-namespace cuda {
+
+namespace polyarith::cuda {
 
 class NttForwardTwiddle16x16Coalesced {
   using multiplier_type = modular::MontgomeryFriendlyMultiplier64;
@@ -30,9 +30,9 @@ class NttForwardTwiddle16x16Coalesced {
   } values[8];
 
 public:
-  NttForwardTwiddle16x16Coalesced(void) = default;
+  NttForwardTwiddle16x16Coalesced() = default;
 
-  NttForwardTwiddle16x16Coalesced(const Modulus &modulus) {
+  explicit NttForwardTwiddle16x16Coalesced(const Modulus &modulus) {
     const std::uint64_t root = modulus.get_root_forward(16 * 16);
 
     std::uint64_t forward_twiddle[16][16];
@@ -79,9 +79,9 @@ class NttForwardTwiddleWmma16x16 {
   multiplier_type values[16][16];
 
 public:
-  NttForwardTwiddleWmma16x16(void) = default;
+  NttForwardTwiddleWmma16x16() = default;
 
-  NttForwardTwiddleWmma16x16(const Modulus &modulus) {
+  explicit NttForwardTwiddleWmma16x16(const Modulus &modulus) {
     const std::uint64_t root = modulus.get_root_forward(16 * 16);
 
     std::uint64_t forward_twiddle[16][16];
@@ -141,9 +141,9 @@ private:
   } values[n / 256];
 
 public:
-  NttForwardTwiddleIterativeCoalesced(void) = default;
+  NttForwardTwiddleIterativeCoalesced() = default;
 
-  NttForwardTwiddleIterativeCoalesced(const Modulus &modulus) {
+  explicit NttForwardTwiddleIterativeCoalesced(const Modulus &modulus) {
     const std::uint64_t root = modulus.get_root_forward(n);
 
     std::vector<std::uint64_t> forward_twiddle_data(n);
@@ -204,9 +204,9 @@ private:
   multiplier_type values[n / 16 / 16][16][16];
 
 public:
-  NttForwardTwiddleIterativeWmma(void) = default;
+  NttForwardTwiddleIterativeWmma() = default;
 
-  NttForwardTwiddleIterativeWmma(const Modulus &modulus) {
+  explicit NttForwardTwiddleIterativeWmma(const Modulus &modulus) {
     const std::uint64_t root = modulus.get_root_forward(n);
 
     std::vector<std::uint64_t> forward_twiddle_data(n);
@@ -246,8 +246,8 @@ public:
   }
 };
 
-} // namespace cuda
+} // namespace polyarith::cuda
 
-} // namespace polyarith
+
 
 #endif /* POLYARITH_CUDA_TWIDDLE_CUH_INCLUDED */

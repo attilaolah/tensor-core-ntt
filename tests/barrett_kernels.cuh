@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <utility>
 
 __global__ void shift_right_kernel(uint64_t *out, const uint64_t *in,
                                    size_t shift, size_t n) {
@@ -18,7 +19,7 @@ __global__ void sub_kernel_and_resolve(uint64_t *r, const uint64_t *t,
   if (threadIdx.x == 0 && blockIdx.x == 0) {
     int64_t borrow = 0;
     for (size_t i = 0; i < n; ++i) {
-      int64_t diff = (int64_t)t[i] - (int64_t)z2[i] - borrow;
+      int64_t diff = static_cast<int64_t>(t[i]) - static_cast<int64_t>(z2[i]) - borrow;
       if (diff < 0) {
         diff += 65536;
         borrow = 1;
@@ -49,7 +50,7 @@ single_block_arbitrary_conditional_sub_p_kernel(uint64_t *r, const uint64_t *p,
       for (int i = 3; i >= 0; --i) {
         int local_idx = tid + i * 1024;
         int global_idx = base + local_idx;
-        if (global_idx < n) {
+        if (std::cmp_less(global_idx , n)) {
           uint64_t r_val = r[global_idx];
           uint64_t p_val = p[global_idx];
           if (r_val != p_val) {
@@ -86,8 +87,9 @@ single_block_arbitrary_conditional_sub_p_kernel(uint64_t *r, const uint64_t *p,
     }
 
     bool geq = (max_diff_idx == -1) || (max_diff_sign == 1);
-    if (!geq)
+    if (!geq) {
       break;
+}
 
     int64_t borrow_in = 0;
     for (int chunk = 0; chunk < num_chunks; chunk++) {
@@ -96,17 +98,17 @@ single_block_arbitrary_conditional_sub_p_kernel(uint64_t *r, const uint64_t *p,
       for (int i = 0; i < 4; ++i) {
         int local_idx = tid + i * 1024;
         int global_idx = base + local_idx;
-        if (global_idx < n) {
-          int64_t diff = (int64_t)r[global_idx] - (int64_t)p[global_idx];
-          s_r[local_idx] = (uint64_t)diff;
+        if (std::cmp_less(global_idx , n)) {
+          int64_t diff = static_cast<int64_t>(r[global_idx]) - static_cast<int64_t>(p[global_idx]);
+          s_r[local_idx] = static_cast<uint64_t>(diff);
         } else {
           s_r[local_idx] = 0;
         }
       }
       if (tid == 0) {
         s_r[4096] = 0;
-        int64_t diff = (int64_t)s_r[0] - borrow_in;
-        s_r[0] = (uint64_t)diff;
+        int64_t diff = static_cast<int64_t>(s_r[0]) - borrow_in;
+        s_r[0] = static_cast<uint64_t>(diff);
       }
       __syncthreads();
 
@@ -115,32 +117,33 @@ single_block_arbitrary_conditional_sub_p_kernel(uint64_t *r, const uint64_t *p,
         changed = 0;
         for (int i = 0; i < 4; ++i) {
           int local_idx = tid + i * 1024;
-          if (base + local_idx >= n)
+          if (std::cmp_greater_equal(base + local_idx , n)) {
             continue;
+}
 
-          int64_t val = (int64_t)s_r[local_idx];
+          auto val = static_cast<int64_t>(s_r[local_idx]);
           if (val < 0) {
             changed = 1;
-            atomicAdd((unsigned long long *)&s_r[local_idx], 65536ULL);
-            atomicAdd((unsigned long long *)&s_r[local_idx + 1], -1ULL);
+            atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx]), 65536ULL);
+            atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx + 1]), -1ULL);
           } else if (val >= 65536) {
             changed = 1;
             uint64_t carry = val >> 16;
-            atomicAdd((unsigned long long *)&s_r[local_idx],
-                      -(unsigned long long)(carry << 16));
-            atomicAdd((unsigned long long *)&s_r[local_idx + 1], carry);
+            atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx]),
+                      -static_cast<unsigned long long>(carry << 16));
+            atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx + 1]), carry);
           }
         }
         changed = __syncthreads_or(changed);
       }
 
-      borrow_in = -(int64_t)s_r[4096];
+      borrow_in = -static_cast<int64_t>(s_r[4096]);
       __syncthreads();
 
       for (int i = 0; i < 4; ++i) {
         int local_idx = tid + i * 1024;
         int global_idx = base + local_idx;
-        if (global_idx < n) {
+        if (std::cmp_less(global_idx , n)) {
           r[global_idx] = s_r[local_idx];
         }
       }

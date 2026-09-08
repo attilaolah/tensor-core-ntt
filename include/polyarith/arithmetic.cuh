@@ -8,12 +8,12 @@
 #include <concepts>
 #include <cstdint>
 
-namespace polyarith {
 
-namespace arithmetic {
+
+namespace polyarith::arithmetic {
 
 template <class T>
-static constexpr std::uint32_t bitswap_within(T value, const int width)
+static constexpr auto bitswap_within(T value, const int width) -> std::uint32_t
   requires std::same_as<T, std::uint32_t>
 {
   constexpr std::uint32_t c0 = UINT32_C(0x5555'5555),
@@ -29,8 +29,8 @@ static constexpr std::uint32_t bitswap_within(T value, const int width)
 }
 
 template <class T>
-static __host__ __device__ std::uint32_t concatenate(const T a0, const T a1,
-                                                     const T a2, const T a3)
+static __host__ __device__ auto concatenate(const T a0, const T a1,
+                                                     const T a2, const T a3) -> std::uint32_t
   requires std::same_as<T, std::uint8_t>
 {
 #if defined(__CUDA_ARCH__)
@@ -57,7 +57,7 @@ static __host__ __device__ std::uint32_t concatenate(const T a0, const T a1,
 }
 
 template <class T>
-static __host__ __device__ std::uint64_t concatenate(const T a0, const T a1)
+static __host__ __device__ auto concatenate(const T a0, const T a1) -> std::uint64_t
   requires std::same_as<T, std::uint32_t>
 {
 #if defined(__CUDA_ARCH__)
@@ -81,9 +81,9 @@ static __host__ __device__ std::uint64_t concatenate(const T a0, const T a1)
  * SEL steps with simply the LOP3 SASS instruction.
  */
 
-static __host__ __device__ std::uint64_t
+static __host__ __device__ auto
 subtract_and_add_if_borrows(const std::uint64_t a, const std::uint64_t b,
-                            const std::uint64_t c) {
+                            const std::uint64_t c) -> std::uint64_t {
 #if defined(__CUDA_ARCH__)
   std::uint64_t d;
   asm("{\n"
@@ -108,7 +108,7 @@ subtract_and_add_if_borrows(const std::uint64_t a, const std::uint64_t b,
 }
 
 template <class T>
-static __host__ __device__ std::uint32_t multiply_high(const T a, const T b)
+static __host__ __device__ auto multiply_high(const T a, const T b) -> std::uint32_t
   requires std::same_as<T, std::uint32_t>
 {
 #if defined(__CUDA_ARCH__)
@@ -119,7 +119,7 @@ static __host__ __device__ std::uint32_t multiply_high(const T a, const T b)
 }
 
 template <class T>
-static __host__ __device__ std::uint64_t multiply_high(const T a, const T b)
+static __host__ __device__ auto multiply_high(const T a, const T b) -> std::uint64_t
   requires std::same_as<T, std::uint64_t>
 {
 #if defined(__CUDA_ARCH__)
@@ -130,7 +130,7 @@ static __host__ __device__ std::uint64_t multiply_high(const T a, const T b)
 }
 
 template <class T>
-static __host__ __device__ std::uint64_t multiply_wide(const T a, const T b)
+static __host__ __device__ auto multiply_wide(const T a, const T b) -> std::uint64_t
   requires std::same_as<T, std::uint32_t>
 {
 #if defined(__CUDA_ARCH__)
@@ -143,14 +143,14 @@ static __host__ __device__ std::uint64_t multiply_wide(const T a, const T b)
 }
 
 template <class T>
-static __host__ __device__ unsigned __int128 multiply_wide(const T a, const T b)
+static __host__ __device__ auto multiply_wide(const T a, const T b) -> unsigned __int128
   requires std::same_as<T, std::uint64_t>
 {
   return static_cast<unsigned __int128>(a) * b;
 }
 
-} // namespace arithmetic
+} // namespace polyarith::arithmetic
 
-} // namespace polyarith
+
 
 #endif /* POLYARITH_ARITHMETIC_CUH_INCLUDED */

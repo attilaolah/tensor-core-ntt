@@ -16,6 +16,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 // Include everything from test-ntt to reuse kernels and precomputation structs
@@ -25,12 +26,12 @@
 // -------------------------------------------------------------------------
 // Constants and Primitives
 // -------------------------------------------------------------------------
-constexpr size_t N = 4096;
+// constexpr size_t N = 4096;
 constexpr int MODULUS_BITS = 64;
 
 __global__ void mul_2_kernel(const uint64_t *in, uint64_t *out, size_t n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < n) {
+  if (std::cmp_less(idx , n)) {
     uint64_t val = in[idx];
     uint64_t carry_in = (idx == 0) ? 0 : (in[idx - 1] >> 15);
     out[idx] = ((val & 0x7FFF) << 1) | carry_in;
@@ -41,8 +42,8 @@ __global__ void pointwise_multiply_scaled(uint64_t *out, const uint64_t *a,
                                           const uint64_t *b, uint64_t inv_n,
                                           uint64_t modulus_val, size_t n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < n) {
-    unsigned __int128 p1 = (unsigned __int128)a[idx] * b[idx];
+  if (std::cmp_less(idx , n)) {
+    unsigned __int128 p1 = static_cast<unsigned __int128>(a[idx]) * b[idx];
     out[idx] = p1 % modulus_val;
   }
 }
@@ -63,15 +64,15 @@ __global__ void reverse_and_scale(uint64_t *data, uint64_t inv_n,
                                   uint64_t modulus_val, size_t n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx == 0 || idx == n / 2) {
-    unsigned __int128 p = (unsigned __int128)data[idx] * inv_n;
+    unsigned __int128 p = static_cast<unsigned __int128>(data[idx]) * inv_n;
     data[idx] = p % modulus_val;
   } else if (idx < n / 2) {
     size_t opp = n - idx;
     uint64_t val_idx = data[idx];
     uint64_t val_opp = data[opp];
 
-    unsigned __int128 p1 = (unsigned __int128)val_opp * inv_n;
-    unsigned __int128 p2 = (unsigned __int128)val_idx * inv_n;
+    unsigned __int128 p1 = static_cast<unsigned __int128>(val_opp) * inv_n;
+    unsigned __int128 p2 = static_cast<unsigned __int128>(val_idx) * inv_n;
 
     data[idx] = p1 % modulus_val;
     data[opp] = p2 % modulus_val;
@@ -92,7 +93,7 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
     for (int i = 0; i < 4; ++i) {
       int local_idx = tid + i * 1024;
       int global_idx = base + local_idx;
-      if (global_idx < n) {
+      if (std::cmp_less(global_idx , n)) {
         smem[local_idx] = data[global_idx];
       } else {
         smem[local_idx] = 0;
@@ -109,17 +110,18 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
       changed = 0;
       for (int i = 0; i < 4; ++i) {
         int local_idx = tid + i * 1024;
-        if (base + local_idx >= n)
+        if (std::cmp_greater_equal(base + local_idx , n)) {
           continue;
+}
 
         uint64_t val = smem[local_idx];
         uint64_t c = val >> 16;
         if (c > 0) {
           changed = 1;
-          atomicAdd((unsigned long long *)&smem[local_idx],
-                    -(unsigned long long)(c << 16));
-          atomicAdd((unsigned long long *)&smem[local_idx + 1],
-                    (unsigned long long)c);
+          atomicAdd(reinterpret_cast<unsigned long long *>(&smem[local_idx]),
+                    -static_cast<unsigned long long>(c << 16));
+          atomicAdd(reinterpret_cast<unsigned long long *>(&smem[local_idx + 1]),
+                    static_cast<unsigned long long>(c));
         }
       }
       changed = __syncthreads_or(changed);
@@ -131,7 +133,7 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
     for (int i = 0; i < 4; ++i) {
       int local_idx = tid + i * 1024;
       int global_idx = base + local_idx;
-      if (global_idx < n) {
+      if (std::cmp_less(global_idx , n)) {
         data[global_idx] = smem[local_idx];
       }
     }
@@ -159,17 +161,17 @@ __global__ void single_block_arbitrary_sub_kernel(uint64_t *r,
     for (int i = 0; i < 4; ++i) {
       int local_idx = tid + i * 1024;
       int global_idx = base + local_idx;
-      if (global_idx < n) {
-        int64_t diff = (int64_t)t[global_idx] - (int64_t)z2[global_idx];
-        s_r[local_idx] = (uint64_t)diff;
+      if (std::cmp_less(global_idx , n)) {
+        int64_t diff = static_cast<int64_t>(t[global_idx]) - static_cast<int64_t>(z2[global_idx]);
+        s_r[local_idx] = static_cast<uint64_t>(diff);
       } else {
         s_r[local_idx] = 0;
       }
     }
     if (tid == 0) {
       s_r[4096] = 0;
-      int64_t diff = (int64_t)s_r[0] - borrow_in;
-      s_r[0] = (uint64_t)diff;
+      int64_t diff = static_cast<int64_t>(s_r[0]) - borrow_in;
+      s_r[0] = static_cast<uint64_t>(diff);
     }
     __syncthreads();
 
@@ -178,32 +180,33 @@ __global__ void single_block_arbitrary_sub_kernel(uint64_t *r,
       changed = 0;
       for (int i = 0; i < 4; ++i) {
         int local_idx = tid + i * 1024;
-        if (base + local_idx >= n)
+        if (std::cmp_greater_equal(base + local_idx , n)) {
           continue;
+}
 
-        int64_t val = (int64_t)s_r[local_idx];
+        auto val = static_cast<int64_t>(s_r[local_idx]);
         if (val < 0) {
           changed = 1;
-          atomicAdd((unsigned long long *)&s_r[local_idx], 65536ULL);
-          atomicAdd((unsigned long long *)&s_r[local_idx + 1], -1ULL);
+          atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx]), 65536ULL);
+          atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx + 1]), -1ULL);
         } else if (val >= 65536) {
           changed = 1;
           uint64_t carry = val >> 16;
-          atomicAdd((unsigned long long *)&s_r[local_idx],
-                    -(unsigned long long)(carry << 16));
-          atomicAdd((unsigned long long *)&s_r[local_idx + 1], carry);
+          atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx]),
+                    -static_cast<unsigned long long>(carry << 16));
+          atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx + 1]), carry);
         }
       }
       changed = __syncthreads_or(changed);
     }
 
-    borrow_in = -(int64_t)s_r[4096];
+    borrow_in = -static_cast<int64_t>(s_r[4096]);
     __syncthreads();
 
     for (int i = 0; i < 4; ++i) {
       int local_idx = tid + i * 1024;
       int global_idx = base + local_idx;
-      if (global_idx < n) {
+      if (std::cmp_less(global_idx , n)) {
         r[global_idx] = s_r[local_idx];
       }
     }
@@ -291,15 +294,17 @@ void launch_inverse_ntt_fermat(
 // -------------------------------------------------------------------------
 // Wrapper for Forward/Inverse NTT on Tensor Cores (N=65536)
 // -------------------------------------------------------------------------
-bool read_prime(const char *file, size_t target_bits, size_t tolerance,
-                mpz_t out) {
+auto read_prime(const char *file, size_t target_bits, size_t tolerance,
+                mpz_t out) -> bool {
   std::ifstream f(file);
-  if (!f.is_open())
+  if (!f.is_open()) {
     return false;
+}
   std::string line;
   while (std::getline(f, line)) {
-    if (line.empty() || line[0] == '#')
+    if (line.empty() || line[0] == '#') {
       continue;
+}
     mpz_t p;
     mpz_init_set_str(p, line.c_str(), 10);
     size_t bits = mpz_sizeinbase(p, 2);
@@ -327,19 +332,20 @@ void gmp_to_limbs(mpz_t x, std::vector<uint64_t> &limbs, size_t N_val) {
 // Convert base 2^16 limbs to GMP
 void limbs_to_gmp(const std::vector<uint64_t> &limbs, mpz_t x, size_t N_val) {
   std::vector<uint16_t> short_limbs(N_val);
-  for (size_t i = 0; i < N_val; i++)
-    short_limbs[i] = (uint16_t)limbs[i];
+  for (size_t i = 0; i < N_val; i++) {
+    short_limbs[i] = static_cast<uint16_t>(limbs[i]);
+}
   mpz_import(x, N_val, -1, sizeof(uint16_t), 0, 0, short_limbs.data());
 }
 
-bool run_fermat_pipeline(
+auto run_fermat_pipeline(
     mpz_t p, size_t /*bit_len*/, size_t d, size_t N_val, uint64_t inv_n,
     const polyarith::Modulus &modulus,
     const precomputation::Precomputation<MODULUS_BITS> *precomp_device_ptr,
     const precomputation::ConstantPrecomputation<MODULUS_BITS>
         &constant_precomp,
     const std::vector<uint64_t> &h_P_in = std::vector<uint64_t>(),
-    const std::vector<uint64_t> &h_mu_in = std::vector<uint64_t>()) {
+    const std::vector<uint64_t> &h_mu_in = std::vector<uint64_t>()) -> bool {
   std::vector<uint64_t> h_P = h_P_in;
   std::vector<uint64_t> h_mu = h_mu_in;
 
@@ -447,7 +453,7 @@ bool run_fermat_pipeline(
       raw_X, raw_P, d, N_val);
 
   cudaStreamEndCapture(stream, &graph);
-  cudaGraphInstantiate(&instance, graph, NULL, NULL, 0);
+  cudaGraphInstantiate(&instance, graph, nullptr, nullptr, 0);
 
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
@@ -459,8 +465,9 @@ bool run_fermat_pipeline(
 
   int total_steps = actual_bit_len - 1;
   int twenty_percent = total_steps / 5;
-  if (twenty_percent == 0)
+  if (twenty_percent == 0) {
     twenty_percent = 1;
+}
 
   for (int i = actual_bit_len - 2; i >= 0; --i) {
     cudaGraphLaunch(instance, stream);
@@ -479,7 +486,7 @@ bool run_fermat_pipeline(
       cudaStreamSynchronize(stream);
       std::cout << "Progress: " << (squarings * 100 / total_steps) << "% ("
                 << squarings << "/" << total_steps << " squarings)"
-                << std::endl;
+                << '\n';
     }
   }
 
@@ -503,10 +510,10 @@ bool run_fermat_pipeline(
     size_t exact_bits = mpz_sizeinbase(p, 2);
     std::cout << "[PASS] Prime: " << exact_digits << " digits (" << exact_bits
               << " bits) | Total Time: " << total_sec
-              << " s | Avg per step: " << avg_us << " us" << std::endl;
+              << " s | Avg per step: " << avg_us << " us" << '\n';
     is_prime = true;
   } else {
-    std::cout << "  [FAIL] Final x != 1" << std::endl;
+    std::cout << "  [FAIL] Final x != 1" << '\n';
   }
 
   mpz_clear(final_val);
@@ -541,7 +548,7 @@ struct Candidate {
     h_mu = other.h_mu;
   }
 
-  Candidate &operator=(const Candidate &other) {
+  auto operator=(const Candidate &other) -> Candidate & {
     if (this != &other) {
       mpz_set(p, other.p);
       bit_len = other.bit_len;
@@ -557,9 +564,9 @@ struct Candidate {
   ~Candidate() { mpz_clear(p); }
 };
 
-Candidate prepare_next_candidate(mpz_t K,
+auto prepare_next_candidate(mpz_t K,
                                  const std::vector<uint64_t> &sieve_primes,
-                                 std::mt19937_64 &rng) {
+                                 std::mt19937_64 &rng) -> Candidate {
   Candidate c;
   std::uniform_int_distribution<size_t> dist(0, sieve_primes.size() - 1);
   c.q_val = sieve_primes[dist(rng)];
@@ -568,10 +575,11 @@ Candidate prepare_next_candidate(mpz_t K,
 
   c.bit_len = mpz_sizeinbase(c.p, 2);
   c.d = (c.bit_len + 15) / 16;
-  if (c.bit_len <= 32000)
+  if (c.bit_len <= 32000) {
     c.N_val = 4096;
-  else
+  } else {
     c.N_val = 65536;
+}
 
   mpz_t B_2d, mu;
   mpz_init(B_2d);
@@ -592,8 +600,8 @@ Candidate prepare_next_candidate(mpz_t K,
 // -------------------------------------------------------------------------
 // Main
 // -------------------------------------------------------------------------
-int main(int argc, char **argv) {
-  std::cout << "Starting Fermat Harness" << std::endl;
+auto main(int argc, char **argv) -> int {
+  std::cout << "Starting Fermat Harness" << '\n';
   // Set up NTT field
   const polyarith::Modulus modulus(UINT64_C(0x1fff'fff9'0000'0001), 3);
 
@@ -624,14 +632,18 @@ int main(int argc, char **argv) {
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
-    if (arg == "--file" && i + 1 < argc)
+    if (arg == "--file" && i + 1 < argc) {
       filename = argv[++i];
-    if (arg == "--phase" && i + 1 < argc)
+}
+    if (arg == "--phase" && i + 1 < argc) {
       phase = std::stoi(argv[++i]);
-    if (arg == "--target-bits" && i + 1 < argc)
+}
+    if (arg == "--target-bits" && i + 1 < argc) {
       target_bits = std::stoull(argv[++i]);
-    if (arg == "--index" && i + 1 < argc)
+}
+    if (arg == "--index" && i + 1 < argc) {
       target_index = std::stoi(argv[++i]);
+}
     if (arg == "--primes" && i + 1 < argc) {
       primes_file_name = argv[++i];
       is_crunch = true;
@@ -643,18 +655,19 @@ int main(int argc, char **argv) {
   }
 
   if (is_crunch) {
-    std::cout << "--- Crunch Mode ---" << std::endl;
+    std::cout << "--- Crunch Mode ---" << '\n';
     std::vector<std::string> p_strs;
     std::ifstream pf(primes_file_name);
     std::string line;
     while (std::getline(pf, line)) {
-      if (line.empty() || line[0] == '#')
+      if (line.empty() || line[0] == '#') {
         continue;
+}
       p_strs.push_back(line);
     }
     // sort by length
     std::sort(p_strs.begin(), p_strs.end(),
-              [](const std::string &a, const std::string &b) {
+              [](const std::string &a, const std::string &b) -> bool {
                 return a.length() < b.length();
               });
 
@@ -671,12 +684,13 @@ int main(int argc, char **argv) {
     std::vector<uint64_t> sieve_primes;
     std::ifstream sf(sieve_file_name);
     while (std::getline(sf, line)) {
-      if (line.empty() || line[0] == '#')
+      if (line.empty() || line[0] == '#') {
         continue;
+}
       sieve_primes.push_back(std::stoull(line));
     }
     std::cout << "Loaded " << sieve_primes.size() << " sieve primes."
-              << std::endl;
+              << '\n';
 
     std::random_device rd;
     std::mt19937_64 rng(rd());
@@ -698,7 +712,7 @@ int main(int argc, char **argv) {
                 << std::put_time(std::localtime(&now), "%Y-%m-%d %H:%M:%S")
                 << "] "
                 << "Testing candidate with q=" << cand.q_val << " ("
-                << cand.bit_len << " bits)" << std::endl;
+                << cand.bit_len << " bits)" << '\n';
 
       uint64_t inv_n = modulus.invert(cand.N_val);
       bool passed = run_fermat_pipeline(
@@ -707,11 +721,11 @@ int main(int argc, char **argv) {
           cand.h_P, cand.h_mu);
 
       if (passed) {
-        std::cout << "*** FOUND PROBABLE PRIME! ***" << std::endl;
+        std::cout << "*** FOUND PROBABLE PRIME! ***" << '\n';
         std::ofstream outf("found_primes.txt", std::ios::app);
         outf << "q=" << cand.q_val << " P=";
-        char *p_str = mpz_get_str(NULL, 10, cand.p);
-        outf << p_str << std::endl;
+        char *p_str = mpz_get_str(nullptr, 10, cand.p);
+        outf << p_str << '\n';
         free(p_str);
       }
     }
@@ -724,18 +738,19 @@ int main(int argc, char **argv) {
   }
 
   if (phase == 2) {
-    std::cout << "--- Phase 2: Full Fermat Primality ---" << std::endl;
+    std::cout << "--- Phase 2: Full Fermat Primality ---" << '\n';
     std::ifstream primes_file(filename);
     if (!primes_file.is_open()) {
-      std::cout << "Could not open " << filename << std::endl;
+      std::cout << "Could not open " << filename << '\n';
       return 1;
     }
 
     std::string line;
     std::vector<std::string> candidates;
     while (std::getline(primes_file, line)) {
-      if (line.empty() || line[0] == '#')
+      if (line.empty() || line[0] == '#') {
         continue;
+}
       candidates.push_back(line);
     }
 
@@ -755,8 +770,8 @@ int main(int argc, char **argv) {
       }
     }
 
-    if (selected_idx < 0 || selected_idx >= (int)candidates.size()) {
-      std::cout << "Candidate not found!" << std::endl;
+    if (selected_idx < 0 || std::cmp_greater_equal(selected_idx ,candidates.size())) {
+      std::cout << "Candidate not found!" << '\n';
       return 1;
     }
 
@@ -768,27 +783,28 @@ int main(int argc, char **argv) {
     size_t d = (bit_len + 15) / 16;
 
     size_t N_val;
-    if (bit_len <= 32000)
+    if (bit_len <= 32000) {
       N_val = 4096;
-    else
+    } else {
       N_val = 65536;
+}
 
     if (2 * d + 2 > N_val) {
       std::cout << "ERROR: N_val " << N_val
                 << " is not sufficient for 2d+2=" << (2 * d + 2)
-                << " limbs to prevent aliasing." << std::endl;
+                << " limbs to prevent aliasing." << '\n';
       return 1;
     }
 
     uint64_t inv_n = modulus.invert(N_val);
-    std::cout << "Testing prime index " << selected_idx << ":" << std::endl;
-    std::cout << "exact decimal digit count: " << exact_digits << std::endl;
-    std::cout << "bit count: " << bit_len << std::endl;
+    std::cout << "Testing prime index " << selected_idx << ":" << '\n';
+    std::cout << "exact decimal digit count: " << exact_digits << '\n';
+    std::cout << "bit count: " << bit_len << '\n';
     std::cout << "d=" << d
               << " limbs, max convolution length 2d+2=" << (2 * d + 2)
-              << std::endl;
+              << '\n';
     std::cout << "Chosen N_val: " << N_val
-              << " (sufficient zero-padding guaranteed)" << std::endl;
+              << " (sufficient zero-padding guaranteed)" << '\n';
 
     run_fermat_pipeline(p, bit_len, d, N_val, inv_n, modulus,
                         thrust::raw_pointer_cast(precomp_device.get()),

@@ -7,9 +7,9 @@
 #include <stdexcept>
 #include <string>
 
-namespace polyarith {
 
-namespace cuda {
+
+namespace polyarith::cuda {
 
 void checkCudaErrors_impl(const cudaError_t result, const char *const func,
                           const char *const file, const int line) {
@@ -24,8 +24,8 @@ void checkCudaErrors_impl(const cudaError_t result, const char *const func,
 #define checkCudaErrors(value)                                                 \
   polyarith::cuda::checkCudaErrors_impl((value), #value, __FILE__, __LINE__)
 
-} // namespace cuda
+} // namespace polyarith::cuda
 
-} // namespace polyarith
+
 
 #endif /* POLYARITH_CUDA_ERROR_CUH_INCLUDED */

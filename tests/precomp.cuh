@@ -7,12 +7,12 @@ public:
   using reduction_type =
       polyarith::modular::MontgomeryFriendlyReductionBy64<modulus_bits>;
 
-  __align__(16) std::uint64_t modulus;
+  __align__(16) uint64_t modulus;
   __align__(16) reduction_type friendly_reduction;
 
-  ConstantPrecomputation(void) = default;
+  ConstantPrecomputation() = default;
 
-  ConstantPrecomputation(const polyarith::Modulus &modulus)
+  explicit ConstantPrecomputation(const polyarith::Modulus &modulus)
 
       : modulus(modulus.get_modulus()),
         friendly_reduction(modulus.get_modulus()) {}
@@ -88,9 +88,9 @@ public:
   __align__(16) polyarith::cuda::NttForwardScalarIterative<
       (1 << 24), 16> ntt_forward_scalar_iterative_radix16_two24;
 
-  Precomputation(void) = default;
+  Precomputation() = default;
 
-  Precomputation(const polyarith::Modulus &modulus)
+  explicit Precomputation(const polyarith::Modulus &modulus)
       : ntt_forward_16x16(modulus), ntt_forward_wmma_16x16(modulus),
         ntt_forward_twiddle_16x16(modulus),
         ntt_forward_twiddle_wmma_16x16(modulus),

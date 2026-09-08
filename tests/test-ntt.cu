@@ -13,14 +13,15 @@
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
+#include <utility>
 
 #include "ntt-reference.hpp"
 #include "polyarith/polyarith.cuh"
 
-static boost::icl::interval_set<int>
+static auto
 find_mismatches(const thrust::host_vector<std::uint64_t> &a,
                 const thrust::host_vector<std::uint64_t> &b,
-                const std::uint64_t modulus) {
+                const std::uint64_t modulus) -> boost::icl::interval_set<int> {
   boost::icl::interval_set<int> mismatches;
 
 #pragma omp parallel
@@ -28,7 +29,7 @@ find_mismatches(const thrust::host_vector<std::uint64_t> &a,
     boost::icl::interval_set<int> m;
 
 #pragma omp for schedule(static) nowait
-    for (int i = 0; i < static_cast<int>(a.size()); ++i) {
+    for (int i = 0; i < (int)a.size(); ++i) {
       if ((a[i] % modulus) != (b[i] % modulus)) {
         m.add(i);
       }
@@ -55,9 +56,9 @@ public:
   __align__(16) std::uint64_t modulus;
   __align__(16) reduction_type friendly_reduction;
 
-  ConstantPrecomputation(void) = default;
+  ConstantPrecomputation() = default;
 
-  ConstantPrecomputation(const polyarith::Modulus &modulus)
+  explicit ConstantPrecomputation(const polyarith::Modulus &modulus)
 
       : modulus(modulus.get_modulus()),
         friendly_reduction(modulus.get_modulus()) {}
@@ -133,9 +134,9 @@ public:
   __align__(16) polyarith::cuda::NttForwardScalarIterative<
       (1 << 24), 16> ntt_forward_scalar_iterative_radix16_two24;
 
-  Precomputation(void) = default;
+  Precomputation() = default;
 
-  Precomputation(const polyarith::Modulus &modulus)
+  explicit Precomputation(const polyarith::Modulus &modulus)
       : ntt_forward_16x16(modulus), ntt_forward_wmma_16x16(modulus),
         ntt_forward_twiddle_16x16(modulus),
         ntt_forward_twiddle_wmma_16x16(modulus),
@@ -578,7 +579,7 @@ static void test_forward_recursive_two4(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   for (int i = 0; i < 16; ++i) {
@@ -592,7 +593,7 @@ static void test_forward_recursive_two4(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 template <int modulus_bits>
@@ -610,7 +611,7 @@ static void test_forward_recursive_two8(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -622,7 +623,7 @@ static void test_forward_recursive_two8(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 // MARK: Matrix, recursive, WMMA
@@ -642,7 +643,7 @@ static void test_forward_wmma_recursive_two4(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   for (int i = 0; i < 16; ++i) {
@@ -656,7 +657,7 @@ static void test_forward_wmma_recursive_two4(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 template <int modulus_bits>
@@ -674,7 +675,7 @@ static void test_forward_wmma_recursive_two8(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -686,7 +687,7 @@ static void test_forward_wmma_recursive_two8(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 // MARK: Matrix, iterative
@@ -707,7 +708,7 @@ static void test_forward_iterative_two8(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -720,7 +721,7 @@ static void test_forward_iterative_two8(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -733,19 +734,19 @@ static void test_forward_iterative_two8(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -765,7 +766,7 @@ static void test_forward_iterative_two12(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -778,7 +779,7 @@ static void test_forward_iterative_two12(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -800,19 +801,19 @@ static void test_forward_iterative_two12(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -832,7 +833,7 @@ static void test_forward_iterative_two16(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -845,7 +846,7 @@ static void test_forward_iterative_two16(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -876,19 +877,19 @@ static void test_forward_iterative_two16(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -908,7 +909,7 @@ static void test_forward_iterative_two20(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -921,7 +922,7 @@ static void test_forward_iterative_two20(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -961,19 +962,19 @@ static void test_forward_iterative_two20(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -993,7 +994,7 @@ static void test_forward_iterative_two24(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -1006,7 +1007,7 @@ static void test_forward_iterative_two24(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -1055,19 +1056,19 @@ static void test_forward_iterative_two24(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -1087,7 +1088,7 @@ static void test_forward_iterative_two28(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -1100,7 +1101,7 @@ static void test_forward_iterative_two28(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -1158,19 +1159,19 @@ static void test_forward_iterative_two28(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -1192,7 +1193,7 @@ static void test_forward_iterative_wmma_two8(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -1205,7 +1206,7 @@ static void test_forward_iterative_wmma_two8(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -1220,19 +1221,19 @@ static void test_forward_iterative_wmma_two8(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -1252,7 +1253,7 @@ static void test_forward_iterative_wmma_two12(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -1265,7 +1266,7 @@ static void test_forward_iterative_wmma_two12(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -1293,19 +1294,19 @@ static void test_forward_iterative_wmma_two12(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -1325,7 +1326,7 @@ static void test_forward_iterative_wmma_two16(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -1338,7 +1339,7 @@ static void test_forward_iterative_wmma_two16(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -1377,19 +1378,19 @@ static void test_forward_iterative_wmma_two16(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -1409,7 +1410,7 @@ static void test_forward_iterative_wmma_two20(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -1422,7 +1423,7 @@ static void test_forward_iterative_wmma_two20(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -1473,19 +1474,19 @@ static void test_forward_iterative_wmma_two20(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -1505,7 +1506,7 @@ static void test_forward_iterative_wmma_two24(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -1518,7 +1519,7 @@ static void test_forward_iterative_wmma_two24(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -1581,19 +1582,19 @@ static void test_forward_iterative_wmma_two24(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -1613,7 +1614,7 @@ static void test_forward_iterative_wmma_two28(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   if (num_iters == 1) {
@@ -1626,7 +1627,7 @@ static void test_forward_iterative_wmma_two28(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -1701,19 +1702,19 @@ static void test_forward_iterative_wmma_two28(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
   float duration;
   cudaEventElapsedTime(&duration, start, stop);
   std::clog << "Time: " << duration / 1000 << " seconds, "
-            << duration / 1000 / num_iters << " second/iter" << std::endl;
+            << duration / 1000 / num_iters << " second/iter" << '\n';
 
   if (num_iters == 1) {
     const boost::icl::interval_set<int> mismatches =
         find_mismatches(b, b_correct, modulus.get_modulus());
-    std::clog << "Mismatches: " << mismatches << std::endl;
+    std::clog << "Mismatches: " << mismatches << '\n';
   }
 }
 
@@ -1737,7 +1738,7 @@ static void test_forward_scalar_iterative_radix8_two3(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   for (int i = 0; i < num_ntts; ++i) {
@@ -1752,7 +1753,7 @@ static void test_forward_scalar_iterative_radix8_two3(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 template <int modulus_bits>
@@ -1770,7 +1771,7 @@ static void test_forward_scalar_iterative_radix8_two9(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -1799,7 +1800,7 @@ static void test_forward_scalar_iterative_radix8_two9(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -1807,7 +1808,7 @@ static void test_forward_scalar_iterative_radix8_two9(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 template <int modulus_bits>
@@ -1825,7 +1826,7 @@ static void test_forward_scalar_iterative_radix8_two12(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -1863,7 +1864,7 @@ static void test_forward_scalar_iterative_radix8_two12(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -1871,7 +1872,7 @@ static void test_forward_scalar_iterative_radix8_two12(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 template <int modulus_bits>
@@ -1889,7 +1890,7 @@ static void test_forward_scalar_iterative_radix8_two15(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -1936,7 +1937,7 @@ static void test_forward_scalar_iterative_radix8_two15(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32 * 2);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -1944,7 +1945,7 @@ static void test_forward_scalar_iterative_radix8_two15(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 template <int modulus_bits>
@@ -1962,7 +1963,7 @@ static void test_forward_scalar_iterative_radix8_two18(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -2018,7 +2019,7 @@ static void test_forward_scalar_iterative_radix8_two18(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32 * 2);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -2026,7 +2027,7 @@ static void test_forward_scalar_iterative_radix8_two18(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 template <int modulus_bits>
@@ -2044,7 +2045,7 @@ static void test_forward_scalar_iterative_radix8_two21(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -2109,7 +2110,7 @@ static void test_forward_scalar_iterative_radix8_two21(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -2117,7 +2118,7 @@ static void test_forward_scalar_iterative_radix8_two21(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 template <int modulus_bits>
@@ -2135,7 +2136,7 @@ static void test_forward_scalar_iterative_radix8_two24(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -2209,7 +2210,7 @@ static void test_forward_scalar_iterative_radix8_two24(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32 * 2);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -2217,7 +2218,7 @@ static void test_forward_scalar_iterative_radix8_two24(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 // MARK: Scalar, iterative, radix-16
@@ -2237,7 +2238,7 @@ static void test_forward_scalar_iterative_radix16_two12(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -2273,7 +2274,7 @@ static void test_forward_scalar_iterative_radix16_two12(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 template <int modulus_bits>
@@ -2291,7 +2292,7 @@ static void test_forward_scalar_iterative_radix16_two16(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -2336,7 +2337,7 @@ static void test_forward_scalar_iterative_radix16_two16(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 template <int modulus_bits>
@@ -2354,7 +2355,7 @@ static void test_forward_scalar_iterative_radix16_two20(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -2408,7 +2409,7 @@ static void test_forward_scalar_iterative_radix16_two20(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 template <int modulus_bits>
@@ -2426,7 +2427,7 @@ static void test_forward_scalar_iterative_radix16_two24(
   std::default_random_engine gen(42);
   std::uniform_int_distribution<std::uint64_t> dist(0,
                                                     modulus.get_modulus() - 1);
-  thrust::generate(a.begin(), a.end(), [&] { return dist(gen); });
+  thrust::generate(a.begin(), a.end(), [&] -> auto { return dist(gen); });
 
   NttReference ntt_ref(m, modulus.get_modulus(), modulus.get_generator());
   ntt_ref.compute_forward(b_correct.data(), a.data());
@@ -2489,13 +2490,13 @@ static void test_forward_scalar_iterative_radix16_two24(
 
   const boost::icl::interval_set<int> mismatches =
       find_mismatches(b, b_correct, modulus.get_modulus());
-  std::clog << "Mismatches: " << mismatches << std::endl;
+  std::clog << "Mismatches: " << mismatches << '\n';
 }
 
 // MARK: main
 
-int test_ntt_main(const int argc, const char *const argv[]) {
-  std::clog << "Built on " << __DATE__ << ' ' << __TIME__ << std::endl;
+auto test_ntt_main(const int argc, const char *const argv[]) -> int {
+  std::clog << "Built on " << __DATE__ << ' ' << __TIME__ << '\n';
 
   if (argc != 1 + 1) {
     throw std::runtime_error("specify arguments");
@@ -2512,7 +2513,7 @@ int test_ntt_main(const int argc, const char *const argv[]) {
   // const polyarith::Modulus modulus(UINT64_C(0x2b'0000'0001), 3);
   // const polyarith::Modulus modulus(UINT64_C(0xff'0000'0001), 13);
   constexpr int modulus_bits = 64;
-  std::clog << "modulus = " << modulus.get_modulus() << std::endl;
+  std::clog << "modulus = " << modulus.get_modulus() << '\n';
 
   auto precomp_device = thrust::uninitialized_allocate_unique<
       precomputation::Precomputation<modulus_bits>>(

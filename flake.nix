@@ -40,7 +40,7 @@
           buildPhase = ''
             ${exports}
 
-            nvcc -std=c++20 -arch=sm_86 -O3 -Xcompiler -fopenmp,-Wall,-Wextra,-Werror -Iinclude tests/test-fermat.cu -o crunch_sm_86 -lgmp
+            nvcc -std=c++20 -arch=sm_86 -O3 --expt-relaxed-constexpr -Xcompiler -fopenmp,-Wall,-Wextra,-Werror -Iinclude tests/test-fermat.cu -o crunch_sm_86 -lgmp
           '';
 
           installPhase = ''

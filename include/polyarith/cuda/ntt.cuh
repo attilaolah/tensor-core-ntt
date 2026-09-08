@@ -18,9 +18,9 @@
 #include "mma.cuh"
 #include "thread.cuh"
 
-namespace polyarith {
 
-namespace cuda {
+
+namespace polyarith::cuda {
 
 template <class reduction_type_> class NttForward16x16Coalesced {
 public:
@@ -34,9 +34,9 @@ private:
   } values[8];
 
 public:
-  NttForward16x16Coalesced(void) = default;
+  NttForward16x16Coalesced() = default;
 
-  NttForward16x16Coalesced(const Modulus &modulus) {
+  explicit NttForward16x16Coalesced(const Modulus &modulus) {
     const std::uint64_t factor = modulus.power(2, reduction_type::get_factor());
     const std::uint64_t root = modulus.get_root_forward(16);
 
@@ -148,9 +148,9 @@ private:
   std::uint8_t values[8][16][16];
 
 public:
-  NttForwardWmma16x16(void) = default;
+  NttForwardWmma16x16() = default;
 
-  NttForwardWmma16x16(const Modulus &modulus) {
+  explicit NttForwardWmma16x16(const Modulus &modulus) {
     const std::uint64_t factor = modulus.power(2, reduction_type::get_factor());
     const std::uint64_t root = modulus.get_root_forward(16);
 
@@ -189,8 +189,8 @@ private:
 
     nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, std::int32_t>
         ss[15], tt[8];
-    for (int i = 0; i < 15; ++i) {
-      nvcuda::wmma::fill_fragment(ss[i], 0);
+    for (auto & s : ss) {
+      nvcuda::wmma::fill_fragment(s, 0);
     }
 
     constexpr int num_digits = (reduction_type::modulus_bits + 7) / 8;
@@ -282,9 +282,9 @@ private:
   multiplier_type values[radix - 1][n / radix];
 
 public:
-  NttForwardScalarIterative(void) = default;
+  NttForwardScalarIterative() = default;
 
-  NttForwardScalarIterative(const Modulus &modulus) {
+  explicit NttForwardScalarIterative(const Modulus &modulus) {
     const std::uint64_t root = modulus.get_root_forward(n);
 
 #pragma omp parallel for
@@ -357,8 +357,8 @@ public:
   }
 };
 
-} // namespace cuda
+} // namespace polyarith::cuda
 
-} // namespace polyarith
+
 
 #endif /* POLYARITH_CUDA_NTT_CUH_INCLUDED */

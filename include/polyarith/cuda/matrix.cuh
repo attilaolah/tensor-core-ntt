@@ -10,9 +10,9 @@
 #include "../unreduced_ratio.cuh"
 #include "thread.cuh"
 
-namespace polyarith {
 
-namespace cuda {
+
+namespace polyarith::cuda {
 
 template <class T>
 static void load_matrix_16x16_packed4cols_n_lane(T a[8], const T *const ptr,
@@ -272,8 +272,8 @@ matrix_16x16_decompose_u64_to_u8(std::uint32_t aa[8][2],
   }
 }
 
-} // namespace cuda
+} // namespace polyarith::cuda
 
-} // namespace polyarith
+
 
 #endif /* POLYARITH_CUDA_MATRIX_CUH_INCLUDED */

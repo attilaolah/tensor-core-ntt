@@ -36,12 +36,12 @@ private:
   std::uint64_t *const ptr;
 
 public:
-  __host__ __device__ MatrixView(const std::uint64_t *const ptr)
+  __host__ __device__ explicit MatrixView(const std::uint64_t *const ptr)
       : ptr(const_cast<std::uint64_t *>(ptr)) {}
 
-  __host__ __device__ std::uint64_t *data(void) { return ptr; }
+  __host__ __device__ auto data() -> std::uint64_t * { return ptr; }
 
-  __host__ __device__ std::uint64_t &at(const int i, const int j) {
+  __host__ __device__ auto at(const int i, const int j) -> std::uint64_t & {
     return ptr[row_stride::multiply_floor(i) + col_stride::multiply_floor(j)];
   }
 };

@@ -1,10 +1,10 @@
 template <int m, int n, int modulus_bits>
 static __global__ void __launch_bounds__(1024) run_forward_iterative_radix16(
-    std::uint64_t *const sequence,
+    uint64_t *const sequence,
     const precomputation::Precomputation<modulus_bits> *const precomp,
     const precomputation::ConstantPrecomputation<modulus_bits>
         constant_precomp) {
-  const std::uint64_t modulus = constant_precomp.modulus;
+  const uint64_t modulus = constant_precomp.modulus;
   const typename decltype(precomp->ntt_forward_16x16)::reduction_type
       reduction = constant_precomp.friendly_reduction;
 
@@ -16,8 +16,8 @@ static __global__ void __launch_bounds__(1024) run_forward_iterative_radix16(
                         polyarith::UnreducedRatio<1>>
       block(&sequence[subindex]);
 
-  __align__(16) std::uint64_t a[8];
-  polyarith::cuda::load_matrix2_packed4cols_t(a, block);
+  __align__(16) uint64_t a[8];
+  polyarith::cuda::load_matrix2_packed4cols_t(a, clock);
 
   precomp->ntt_forward_16x16.compute_2t(a, modulus, reduction);
 
@@ -40,17 +40,17 @@ static __global__ void __launch_bounds__(1024) run_forward_iterative_radix16(
     assert(false);
   }
 
-  polyarith::cuda::store_matrix2_packed2cols_n(block, a);
+  polyarith::cuda::store_matrix2_packed2cols_n(clock, a);
 }
 
 template <int m, int n, int modulus_bits>
 static __global__ void __launch_bounds__(1024)
     run_forward_iterative_wmma_radix16(
-        std::uint64_t *const sequence,
+        uint64_t *const sequence,
         const precomputation::Precomputation<modulus_bits> *const precomp,
         const precomputation::ConstantPrecomputation<modulus_bits>
             constant_precomp) {
-  const std::uint64_t modulus = constant_precomp.modulus;
+  const uint64_t modulus = constant_precomp.modulus;
   const typename decltype(precomp->ntt_forward_wmma_16x16)::reduction_type
       reduction = constant_precomp.friendly_reduction;
 
@@ -442,7 +442,7 @@ static void test_forward_iterative_two8(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -455,7 +455,7 @@ static void test_forward_iterative_two8(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -500,7 +500,7 @@ static void test_forward_iterative_two12(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -522,7 +522,7 @@ static void test_forward_iterative_two12(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -567,7 +567,7 @@ static void test_forward_iterative_two16(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -598,7 +598,7 @@ static void test_forward_iterative_two16(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -643,7 +643,7 @@ static void test_forward_iterative_two20(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -683,7 +683,7 @@ static void test_forward_iterative_two20(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -728,7 +728,7 @@ static void test_forward_iterative_two24(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -777,7 +777,7 @@ static void test_forward_iterative_two24(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -822,7 +822,7 @@ static void test_forward_iterative_two28(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   for (int i = 0; i < num_iters; ++i) {
     {
@@ -880,7 +880,7 @@ static void test_forward_iterative_two28(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -927,7 +927,7 @@ static void test_forward_iterative_wmma_two8(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -942,7 +942,7 @@ static void test_forward_iterative_wmma_two8(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -987,7 +987,7 @@ static void test_forward_iterative_wmma_two12(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -1015,7 +1015,7 @@ static void test_forward_iterative_wmma_two12(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -1060,7 +1060,7 @@ static void test_forward_iterative_wmma_two16(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -1099,7 +1099,7 @@ static void test_forward_iterative_wmma_two16(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -1144,7 +1144,7 @@ static void test_forward_iterative_wmma_two20(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -1195,7 +1195,7 @@ static void test_forward_iterative_wmma_two20(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -1240,7 +1240,7 @@ static void test_forward_iterative_wmma_two24(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -1303,7 +1303,7 @@ static void test_forward_iterative_wmma_two24(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -1348,7 +1348,7 @@ static void test_forward_iterative_wmma_two28(
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start, 0);
+  cudaEventRecord(start, nullptr);
 
   const int smem_per_warp = 4 * 8 * 16 * 16;
 
@@ -1423,7 +1423,7 @@ static void test_forward_iterative_wmma_two28(
     }
   }
 
-  cudaEventRecord(stop, 0);
+  cudaEventRecord(stop, nullptr);
 
   cudaEventSynchronize(stop);
 
@@ -1521,7 +1521,7 @@ static void test_forward_scalar_iterative_radix8_two9(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -1585,7 +1585,7 @@ static void test_forward_scalar_iterative_radix8_two12(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -1658,7 +1658,7 @@ static void test_forward_scalar_iterative_radix8_two15(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32 * 2);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -1740,7 +1740,7 @@ static void test_forward_scalar_iterative_radix8_two18(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32 * 2);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -1831,7 +1831,7 @@ static void test_forward_scalar_iterative_radix8_two21(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -1931,7 +1931,7 @@ static void test_forward_scalar_iterative_radix8_two24(
     constexpr int n = 1 << 3;
     const dim3 block_dim(1, 32 * 2);
     const dim3 grid_dim(n / 8 / block_dim.x, m / n / block_dim.y);
-    // TODO: Adopt more optimized butterfly
+    // TODO(ao): Adopt more optimized butterfly
     run_forward_scalar_iterative_within_subsequence_radix8<m, n>
         <<<grid_dim, block_dim>>>(thrust::raw_pointer_cast(b.data()),
                                   precomp_device, constant_precomp);
@@ -2216,7 +2216,7 @@ static void test_forward_scalar_iterative_radix16_two24(
 
 // MARK: main
 
-int main(const int argc, const char *const argv[]) {
+auto main(const int argc, const char *const argv[]) -> int {
   std::clog << "Built on " << __DATE__ << ' ' << __TIME__ << std::endl;
 
   if (argc != 1 + 1) {

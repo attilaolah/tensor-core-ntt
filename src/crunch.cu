@@ -1,3 +1,4 @@
+#include <atomic>
 #include <iomanip>
 // test-fermat.cu
 #include <cuda_runtime.h>
@@ -714,7 +715,7 @@ auto run_fermat_pipeline(
     int c_m = cand_sec / 60; int c_s = cand_sec % 60;
     char time_buf[64];
     snprintf(time_buf, sizeof(time_buf), "[%02d:%02d:%02d %02d:%02d] ", u_h, u_m, u_s, c_m, c_s);
-    std::cout << time_buf << "Q " << q_val << " (" << mpz_sizeinbase(p, 2) << " bits) | SQ " << total_steps << " : " << total_steps << " | 100% | " << result_msg << "\n";
+    std::cout << time_buf << "Q " << q_val << " (" << mpz_sizeinbase(p, 2) << " bits) | SQ " << total_steps << " | 100% | " << result_msg << "\n";
   }
   mpz_clear(final_val);
   mpz_clear(p_minus_1);
@@ -763,11 +764,20 @@ struct Candidate {
   ~Candidate() { mpz_clear(p); }
 };
 
-auto prepare_next_candidate(mpz_t K, const std::vector<uint64_t> &sieve_primes,
-                            std::mt19937_64 &rng) -> Candidate {
+
+inline std::atomic<size_t>& get_candidate_index() {
+  static std::atomic<size_t> idx{0};
+  return idx;
+}
+
+auto prepare_next_candidate(mpz_t K, const std::vector<uint64_t> &sieve_primes) -> Candidate {
   Candidate c;
-  std::uniform_int_distribution<size_t> dist(0, sieve_primes.size() - 1);
-  c.q_val = sieve_primes[dist(rng)];
+  size_t idx = get_candidate_index().fetch_add(1);
+  if (idx >= sieve_primes.size()) {
+    c.q_val = 0; // use 0 as a sentinel to mean we are done
+    return c;
+  }
+  c.q_val = sieve_primes[idx];
 
   mpz_mul_ui(c.p, K, c.q_val);
 
@@ -903,10 +913,11 @@ auto main(int argc, char **argv) -> int {
     std::mutex file_mutex;
 
     auto worker_thread = [&](int thread_id) {
-      std::random_device rd;
-      std::mt19937_64 rng(rd() + thread_id);
       while (true) {
-        Candidate cand = prepare_next_candidate(K, sieve_primes, rng);
+        Candidate cand = prepare_next_candidate(K, sieve_primes);
+        if (cand.q_val == 0) {
+            break; // No more candidates!
+        }
 
         {
           std::lock_guard<std::mutex> lock(get_state_mutex());

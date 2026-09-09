@@ -1,3 +1,4 @@
+#include "polyarith/polyarith.cuh"
 #pragma once
 #include <cstdint>
 #include <utility>

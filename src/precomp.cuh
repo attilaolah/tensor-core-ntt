@@ -1,3 +1,4 @@
+#include "polyarith/polyarith.cuh"
 namespace precomputation {
 
 template <int modulus_bits_> class ConstantPrecomputation {

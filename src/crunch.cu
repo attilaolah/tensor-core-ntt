@@ -906,6 +906,10 @@ auto main(int argc, char **argv) -> int {
       sieve_primes.push_back(std::stoull(line));
     }
     std::cout << "Loaded " << sieve_primes.size() << " sieve primes." << '\n';
+    
+    std::random_device rd;
+    std::mt19937_64 shuffle_rng(rd());
+    std::shuffle(sieve_primes.begin(), sieve_primes.end(), shuffle_rng);
 
     constexpr int BATCH_SIZE = 4;
     std::vector<StreamContext> stream_ctxs(BATCH_SIZE);

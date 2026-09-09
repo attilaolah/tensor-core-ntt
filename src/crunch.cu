@@ -14,6 +14,24 @@ inline auto get_program_start() {
   return start;
 }
 
+
+struct ThreadState {
+  uint64_t q_val = 0;
+  int pct = 0;
+  std::chrono::steady_clock::time_point cand_start;
+  bool is_running = false;
+};
+
+inline std::vector<ThreadState>& get_global_thread_states() {
+  static std::vector<ThreadState> states(4);
+  return states;
+}
+
+inline std::mutex& get_state_mutex() {
+  static std::mutex state_mutex;
+  return state_mutex;
+}
+
 inline std::mutex &get_print_mutex() {
   static std::mutex print_mutex;
   return print_mutex;
@@ -453,7 +471,7 @@ struct StreamContext {
 };
 
 auto run_fermat_pipeline(
-    mpz_t p, size_t /*bit_len*/, size_t d, size_t N_val, uint64_t inv_n,
+    mpz_t p, size_t bit_len, size_t d, size_t N_val, uint64_t inv_n,
     const polyarith::Modulus &modulus,
     const precomputation::Precomputation<MODULUS_BITS> *precomp_device_ptr,
     const precomputation::ConstantPrecomputation<MODULUS_BITS>
@@ -461,8 +479,8 @@ auto run_fermat_pipeline(
     StreamContext &ctx,
     const std::vector<uint64_t> &h_P_in = std::vector<uint64_t>(),
     const std::vector<uint64_t> &h_mu_in = std::vector<uint64_t>(),
-    const std::string &prefix_string = "") -> bool {
-  std::vector<uint64_t> h_P = h_P_in;
+    int thread_id = 0, uint64_t q_val = 0) -> bool {
+  (void)bit_len; std::vector<uint64_t> h_P = h_P_in;
   std::vector<uint64_t> h_mu = h_mu_in;
 
   mpz_t B_2d, mu;
@@ -603,7 +621,7 @@ auto run_fermat_pipeline(
   cudaGraphInstantiate(&instance, graph, nullptr, nullptr, 0);
 
   cudaEventRecord(start, stream);
-  auto cand_start = std::chrono::steady_clock::now();
+  (void)bit_len; (void)q_val;
 
   int squarings = 0;
   int multiplies = 0;
@@ -628,34 +646,34 @@ auto run_fermat_pipeline(
     if (squarings % one_percent == 0 || squarings == total_steps) {
       int pct = (squarings * 100) / total_steps;
 
-      auto now = std::chrono::steady_clock::now();
-      auto uptime_sec = std::chrono::duration_cast<std::chrono::seconds>(
-                            now - get_program_start())
-                            .count();
-      auto cand_sec =
-          std::chrono::duration_cast<std::chrono::seconds>(now - cand_start)
-              .count();
-      int u_h = uptime_sec / 3600;
-      int u_m = (uptime_sec % 3600) / 60;
-      int u_s = uptime_sec % 60;
-      int c_m = cand_sec / 60;
-      int c_s = cand_sec % 60;
-      char time_buf[64];
-      snprintf(time_buf, sizeof(time_buf), "[%02d:%02d:%02d %02d:%02d] ", u_h,
-               u_m, u_s, c_m, c_s);
-
-      {
-        std::lock_guard<std::mutex> lock(get_print_mutex());
-        if (prefix_string.empty()) {
-          std::cout << time_buf << "Progress: " << pct << "% (" << squarings
-                    << "/" << total_steps << " squarings)\n"
-                    << std::flush;
-        } else {
-          std::cout << time_buf << prefix_string << " | SQ " << total_steps
-                    << " : " << std::setw(6) << squarings << " | "
-                    << std::setw(3) << pct << "%\n"
-                    << std::flush;
+      if (pct < 100) {
+        std::lock_guard<std::mutex> lock(get_state_mutex());
+        auto& states = get_global_thread_states();
+        if ((size_t)thread_id < states.size()) {
+          states[thread_id].pct = pct;
         }
+
+        auto now = std::chrono::steady_clock::now();
+        auto uptime_sec = std::chrono::duration_cast<std::chrono::seconds>(now - get_program_start()).count();
+        int u_h = uptime_sec / 3600;
+        int u_m = (uptime_sec % 3600) / 60;
+        int u_s = uptime_sec % 60;
+
+        char uptime_buf[64];
+        snprintf(uptime_buf, sizeof(uptime_buf), "\r[%02d:%02d:%02d]", u_h, u_m, u_s);
+        std::cout << uptime_buf;
+
+        for (size_t t = 0; t < states.size(); t++) {
+          if (states[t].is_running) {
+            auto cand_sec = std::chrono::duration_cast<std::chrono::seconds>(now - states[t].cand_start).count();
+            int c_m = cand_sec / 60;
+            int c_s = cand_sec % 60;
+            char cand_buf[64];
+            snprintf(cand_buf, sizeof(cand_buf), " [%lu %02d:%02d %02d%%]", states[t].q_val, c_m, c_s, states[t].pct);
+            std::cout << cand_buf;
+          }
+        }
+        std::cout << "          " << std::flush;
       }
     }
   }
@@ -675,17 +693,29 @@ auto run_fermat_pipeline(
   float total_sec = ms / 1000.0f;
   float avg_us = ms * 1000.0f / squarings;
   bool is_prime = false;
+  std::string result_msg;
   if (mpz_cmp_ui(final_val, 1) == 0) {
-    size_t exact_digits = mpz_sizeinbase(p, 10);
-    size_t exact_bits = mpz_sizeinbase(p, 2);
-    std::cout << "[PASS] Prime: " << exact_digits << " digits (" << exact_bits
-              << " bits) | Total Time: " << total_sec
-              << " s | Avg per step: " << avg_us << " us" << '\n';
     is_prime = true;
+    result_msg = "*** FOUND PROBABLE PRIME! ***";
   } else {
-    std::cout << "  [FAIL] Final x != 1" << '\n';
+    result_msg = "x != 1";
   }
-
+  {
+    std::lock_guard<std::mutex> lock(get_state_mutex());
+    auto& states = get_global_thread_states();
+    if ((size_t)thread_id < states.size()) {
+      states[thread_id].is_running = false;
+    }
+    std::cout << "\r                                                                                                                                  \r";
+    auto now = std::chrono::steady_clock::now();
+    auto uptime_sec = std::chrono::duration_cast<std::chrono::seconds>(now - get_program_start()).count();
+    auto cand_sec = std::chrono::duration_cast<std::chrono::seconds>(now - states[thread_id].cand_start).count();
+    int u_h = uptime_sec / 3600; int u_m = (uptime_sec % 3600) / 60; int u_s = uptime_sec % 60;
+    int c_m = cand_sec / 60; int c_s = cand_sec % 60;
+    char time_buf[64];
+    snprintf(time_buf, sizeof(time_buf), "[%02d:%02d:%02d %02d:%02d] ", u_h, u_m, u_s, c_m, c_s);
+    std::cout << time_buf << "Q " << q_val << " (" << mpz_sizeinbase(p, 2) << " bits) | SQ " << total_steps << " : " << total_steps << " | 100% | " << result_msg << "\n";
+  }
   mpz_clear(final_val);
   mpz_clear(p_minus_1);
   mpz_clear(mu);
@@ -877,20 +907,23 @@ auto main(int argc, char **argv) -> int {
       std::mt19937_64 rng(rd() + thread_id);
       while (true) {
         Candidate cand = prepare_next_candidate(K, sieve_primes, rng);
-        std::stringstream ss;
-        ss << "T" << thread_id << " Q " << cand.q_val << " (" << cand.bit_len
-           << " bits)";
-        std::string prefix = ss.str();
+
+        {
+          std::lock_guard<std::mutex> lock(get_state_mutex());
+          auto& states = get_global_thread_states();
+          states[thread_id].q_val = cand.q_val;
+          states[thread_id].pct = 0;
+          states[thread_id].cand_start = std::chrono::steady_clock::now();
+          states[thread_id].is_running = true;
+        }
 
         uint64_t inv_n = modulus.invert(cand.N_val);
         bool passed = run_fermat_pipeline(
             cand.p, cand.bit_len, cand.d, cand.N_val, inv_n, modulus,
             thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
-            stream_ctxs[thread_id], cand.h_P, cand.h_mu, prefix);
+            stream_ctxs[thread_id], cand.h_P, cand.h_mu, thread_id, cand.q_val);
 
         if (passed) {
-          std::lock_guard<std::mutex> lock(get_print_mutex());
-          std::cout << "\n*** FOUND PROBABLE PRIME! ***\n";
           std::lock_guard<std::mutex> flock(file_mutex);
           std::ofstream outf("found_primes.txt", std::ios::app);
           outf << "q=" << cand.q_val << " P=";
@@ -986,8 +1019,9 @@ auto main(int argc, char **argv) -> int {
               << " (sufficient zero-padding guaranteed)" << '\n';
 
     StreamContext ctx;
+    std::vector<uint64_t> empty_vec;
     run_fermat_pipeline(p, bit_len, d, N_val, inv_n, modulus,
                         thrust::raw_pointer_cast(precomp_device.get()),
-                        constant_precomp, ctx);
+                        constant_precomp, ctx, empty_vec, empty_vec, 0, 0);
   }
 }

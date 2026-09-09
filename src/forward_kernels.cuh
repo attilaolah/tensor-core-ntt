@@ -1,3 +1,7 @@
+#include "precomp.cuh"
+#include <iostream>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
 #include "polyarith/polyarith.cuh"
 template <int m, int n, int modulus_bits>
 static __global__ void __launch_bounds__(1024) run_forward_iterative_radix16(

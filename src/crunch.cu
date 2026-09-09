@@ -33,7 +33,7 @@ inline std::mutex &get_print_mutex() {
 
 // Include everything from test-ntt to reuse kernels and precomputation structs
 #include "barrett_kernels.cuh"
-#include "test-ntt.cu"
+#include "ntt.cu"
 
 // -------------------------------------------------------------------------
 // Constants and Primitives

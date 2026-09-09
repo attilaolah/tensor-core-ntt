@@ -10,8 +10,6 @@
 #include "../unreduced_ratio.cuh"
 #include "thread.cuh"
 
-
-
 namespace polyarith::cuda {
 
 template <class T>
@@ -273,7 +271,5 @@ matrix_16x16_decompose_u64_to_u8(std::uint32_t aa[8][2],
 }
 
 } // namespace polyarith::cuda
-
-
 
 #endif /* POLYARITH_CUDA_MATRIX_CUH_INCLUDED */

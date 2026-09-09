@@ -16,8 +16,6 @@
 #include "matrix.cuh"
 #include "thread.cuh"
 
-
-
 namespace polyarith::cuda {
 
 class NttForwardTwiddle16x16Coalesced {
@@ -247,7 +245,5 @@ public:
 };
 
 } // namespace polyarith::cuda
-
-
 
 #endif /* POLYARITH_CUDA_TWIDDLE_CUH_INCLUDED */

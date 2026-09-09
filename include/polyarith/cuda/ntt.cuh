@@ -18,8 +18,6 @@
 #include "mma.cuh"
 #include "thread.cuh"
 
-
-
 namespace polyarith::cuda {
 
 template <class reduction_type_> class NttForward16x16Coalesced {
@@ -189,7 +187,7 @@ private:
 
     nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, std::int32_t>
         ss[15], tt[8];
-    for (auto & s : ss) {
+    for (auto &s : ss) {
       nvcuda::wmma::fill_fragment(s, 0);
     }
 
@@ -358,7 +356,5 @@ public:
 };
 
 } // namespace polyarith::cuda
-
-
 
 #endif /* POLYARITH_CUDA_NTT_CUH_INCLUDED */

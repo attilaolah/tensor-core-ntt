@@ -6,8 +6,6 @@
 
 #include <cstdint>
 
-
-
 namespace polyarith::cuda {
 
 [[maybe_unused]]
@@ -75,7 +73,5 @@ static __device__ void mma_m16n16k16(std::uint32_t d[8],
 }
 
 } // namespace polyarith::cuda
-
-
 
 #endif /* POLYARITH_CUDA_MMA_CUH_INCLUDED */

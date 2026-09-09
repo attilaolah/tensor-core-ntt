@@ -10,8 +10,6 @@
 
 #include "arithmetic.cuh"
 
-
-
 namespace polyarith::modular {
 
 static __host__ __device__ auto
@@ -47,7 +45,8 @@ public:
 
 private:
   __device__ auto normalize(const std::uint64_t u,
-                                     const std::uint64_t modulus) const -> std::uint64_t {
+                            const std::uint64_t modulus) const
+      -> std::uint64_t {
     const auto N1 = static_cast<std::uint32_t>(modulus >> 32);
     if (static_cast<std::uint32_t>(u) >= 2 &&
         static_cast<std::uint32_t>(u >> 32) >= N1 * 2) {
@@ -60,10 +59,11 @@ private:
   }
 
   /* Up to 40 bits. */
-  __device__ auto
-  reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
-              const std::uint32_t t2, const std::uint32_t t3,
-              const std::uint32_t t4, const std::uint64_t modulus) const -> std::uint64_t {
+  __device__ auto reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
+                              const std::uint32_t t2, const std::uint32_t t3,
+                              const std::uint32_t t4,
+                              const std::uint64_t modulus) const
+      -> std::uint64_t {
     std::uint64_t u;
 
     asm("{\n\t\t"
@@ -111,11 +111,11 @@ private:
   }
 
   /* Up to 48 bits. */
-  __device__ auto
-  reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
-              const std::uint32_t t2, const std::uint32_t t3,
-              const std::uint32_t t4, const std::uint32_t t5,
-              const std::uint64_t modulus) const -> std::uint64_t {
+  __device__ auto reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
+                              const std::uint32_t t2, const std::uint32_t t3,
+                              const std::uint32_t t4, const std::uint32_t t5,
+                              const std::uint64_t modulus) const
+      -> std::uint64_t {
     std::uint64_t u;
 
     asm("{\n\t\t"
@@ -175,11 +175,12 @@ private:
   }
 
   /* Up to 56 bits. */
-  __device__ auto
-  reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
-              const std::uint32_t t2, const std::uint32_t t3,
-              const std::uint32_t t4, const std::uint32_t t5,
-              const std::uint32_t t6, const std::uint64_t modulus) const -> std::uint64_t {
+  __device__ auto reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
+                              const std::uint32_t t2, const std::uint32_t t3,
+                              const std::uint32_t t4, const std::uint32_t t5,
+                              const std::uint32_t t6,
+                              const std::uint64_t modulus) const
+      -> std::uint64_t {
     std::uint64_t u;
 
     asm("{\n\t\t"
@@ -242,12 +243,12 @@ private:
   }
 
   /* Up to 62 bits. */
-  __device__ auto
-  reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
-              const std::uint32_t t2, const std::uint32_t t3,
-              const std::uint32_t t4, const std::uint32_t t5,
-              const std::uint32_t t6, std::uint32_t t7,
-              const std::uint64_t modulus) const -> std::uint64_t {
+  __device__ auto reduce_impl(const std::uint32_t t0, const std::uint32_t t1,
+                              const std::uint32_t t2, const std::uint32_t t3,
+                              const std::uint32_t t4, const std::uint32_t t5,
+                              const std::uint32_t t6, std::uint32_t t7,
+                              const std::uint64_t modulus) const
+      -> std::uint64_t {
     std::uint64_t u;
 
     asm("{\n\t\t"
@@ -346,11 +347,11 @@ public:
     return 32 * 4;
   }
 
-  __device__ auto
-  reduce(const std::uint32_t t0, const std::uint32_t t1, const std::uint32_t t2,
-         const std::uint32_t t3, const std::uint32_t t4, const std::uint32_t t5,
-         const std::uint32_t t6, std::uint32_t t7,
-         const std::uint64_t modulus) const -> std::uint64_t {
+  __device__ auto reduce(const std::uint32_t t0, const std::uint32_t t1,
+                         const std::uint32_t t2, const std::uint32_t t3,
+                         const std::uint32_t t4, const std::uint32_t t5,
+                         const std::uint32_t t6, std::uint32_t t7,
+                         const std::uint64_t modulus) const -> std::uint64_t {
     if constexpr (modulus_bits <= 40) {
       return reduce_impl(t0, t1, t2, t3, t4, modulus);
     } else if constexpr (modulus_bits <= 48) {
@@ -376,7 +377,8 @@ public:
   }
 
   __host__ __device__ auto multiply(const std::uint64_t a,
-                                             const std::uint64_t N) const -> std::uint64_t {
+                                    const std::uint64_t N) const
+      -> std::uint64_t {
     const std::uint64_t ab1 = arithmetic::multiply_high(a, b);
     const std::uint64_t q = a * bp;
     const std::uint64_t qN1 = arithmetic::multiply_high(q, N);
@@ -404,7 +406,8 @@ public:
   __host__ __device__ auto get_b() const -> std::uint64_t { return b; }
 
   __host__ __device__ auto multiply(const std::uint64_t a,
-                                             const std::uint64_t N) const -> std::uint64_t {
+                                    const std::uint64_t N) const
+      -> std::uint64_t {
     const std::uint32_t a0 = a;
     const std::uint32_t a1 = a >> 32;
     const std::uint32_t b0 = b;
@@ -412,7 +415,8 @@ public:
     const std::uint32_t N1 = N >> 32;
 
     std::uint64_t c;
-    c = arithmetic::multiply_wide(a0, b0) + (static_cast<std::uint64_t>(1) << 32);
+    c = arithmetic::multiply_wide(a0, b0) +
+        (static_cast<std::uint64_t>(1) << 32);
     c = arithmetic::concatenate<std::uint32_t>(c >> 32, N1 + 1) -
         arithmetic::multiply_wide<std::uint32_t>(c, N1) +
         arithmetic::multiply_wide(a0, b1) + arithmetic::multiply_wide(a1, b0);
@@ -430,7 +434,5 @@ public:
 };
 
 } // namespace polyarith::modular
-
-
 
 #endif /* POLYARITH_MODULAR_CUH_INCLUDED */

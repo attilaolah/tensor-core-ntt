@@ -4,8 +4,6 @@
 #ifndef POLYARITH_CUDA_THREAD_CUH_INCLUDED
 #define POLYARITH_CUDA_THREAD_CUH_INCLUDED
 
-
-
 namespace polyarith::cuda {
 
 template <class T> static __device__ auto uniform_hint(const T value) -> T {
@@ -53,7 +51,5 @@ static __device__ auto get_nWarpId() -> int {
 }
 
 } // namespace polyarith::cuda
-
-
 
 #endif /* POLYARITH_CUDA_THREAD_CUH_INCLUDED */

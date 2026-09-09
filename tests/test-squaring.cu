@@ -15,7 +15,7 @@
 __global__ void pointwise_square_scaled(uint64_t *data, uint64_t inv_n,
                                         uint64_t modulus_val, size_t n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (std::cmp_less(idx , n)) {
+  if (std::cmp_less(idx, n)) {
     uint64_t val = data[idx];
     unsigned __int128 p1 = static_cast<unsigned __int128>(val) * val;
     val = p1 % modulus_val;
@@ -105,8 +105,7 @@ auto main() -> int {
 
   // 6. Copy back and verify
   h_data = d_data;
-  std::cout << "Squaring and carry resolution completed successfully!"
-            << '\n';
+  std::cout << "Squaring and carry resolution completed successfully!" << '\n';
 
   return 0;
 }

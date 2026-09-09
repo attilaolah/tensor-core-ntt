@@ -8,6 +8,17 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+
+inline auto get_program_start() {
+  static const auto start = std::chrono::steady_clock::now();
+  return start;
+}
+
+inline std::mutex &get_print_mutex() {
+  static std::mutex print_mutex;
+  return print_mutex;
+}
+
 #include <cstdint>
 #include <deque>
 #include <fstream>
@@ -32,7 +43,7 @@ constexpr int MODULUS_BITS = 64;
 
 __global__ void mul_2_kernel(const uint64_t *in, uint64_t *out, size_t n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (std::cmp_less(idx , n)) {
+  if (idx < n) {
     uint64_t val = in[idx];
     uint64_t carry_in = (idx == 0) ? 0 : (in[idx - 1] >> 15);
     out[idx] = ((val & 0x7FFF) << 1) | carry_in;
@@ -43,7 +54,7 @@ __global__ void pointwise_multiply_scaled(uint64_t *out, const uint64_t *a,
                                           const uint64_t *b, uint64_t inv_n,
                                           uint64_t modulus_val, size_t n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (std::cmp_less(idx , n)) {
+  if (idx < n) {
     unsigned __int128 p1 = static_cast<unsigned __int128>(a[idx]) * b[idx];
     out[idx] = p1 % modulus_val;
   }
@@ -94,7 +105,7 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
     for (int i = 0; i < 4; ++i) {
       int local_idx = tid + i * 1024;
       int global_idx = base + local_idx;
-      if (std::cmp_less(global_idx , n)) {
+      if (global_idx < n) {
         smem[local_idx] = data[global_idx];
       } else {
         smem[local_idx] = 0;
@@ -111,9 +122,9 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
       changed = 0;
       for (int i = 0; i < 4; ++i) {
         int local_idx = tid + i * 1024;
-        if (std::cmp_greater_equal(base + local_idx , n)) {
+        if (base + local_idx >= n) {
           continue;
-}
+        }
 
         uint64_t val = smem[local_idx];
         uint64_t c = val >> 16;
@@ -121,8 +132,9 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
           changed = 1;
           atomicAdd(reinterpret_cast<unsigned long long *>(&smem[local_idx]),
                     -static_cast<unsigned long long>(c << 16));
-          atomicAdd(reinterpret_cast<unsigned long long *>(&smem[local_idx + 1]),
-                    static_cast<unsigned long long>(c));
+          atomicAdd(
+              reinterpret_cast<unsigned long long *>(&smem[local_idx + 1]),
+              static_cast<unsigned long long>(c));
         }
       }
       changed = __syncthreads_or(changed);
@@ -134,7 +146,7 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
     for (int i = 0; i < 4; ++i) {
       int local_idx = tid + i * 1024;
       int global_idx = base + local_idx;
-      if (std::cmp_less(global_idx , n)) {
+      if (global_idx < n) {
         data[global_idx] = smem[local_idx];
       }
     }
@@ -162,8 +174,9 @@ __global__ void single_block_arbitrary_sub_kernel(uint64_t *r,
     for (int i = 0; i < 4; ++i) {
       int local_idx = tid + i * 1024;
       int global_idx = base + local_idx;
-      if (std::cmp_less(global_idx , n)) {
-        int64_t diff = static_cast<int64_t>(t[global_idx]) - static_cast<int64_t>(z2[global_idx]);
+      if (global_idx < n) {
+        int64_t diff = static_cast<int64_t>(t[global_idx]) -
+                       static_cast<int64_t>(z2[global_idx]);
         s_r[local_idx] = static_cast<uint64_t>(diff);
       } else {
         s_r[local_idx] = 0;
@@ -181,21 +194,24 @@ __global__ void single_block_arbitrary_sub_kernel(uint64_t *r,
       changed = 0;
       for (int i = 0; i < 4; ++i) {
         int local_idx = tid + i * 1024;
-        if (std::cmp_greater_equal(base + local_idx , n)) {
+        if (base + local_idx >= n) {
           continue;
-}
+        }
 
         auto val = static_cast<int64_t>(s_r[local_idx]);
         if (val < 0) {
           changed = 1;
-          atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx]), 65536ULL);
-          atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx + 1]), -1ULL);
+          atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx]),
+                    65536ULL);
+          atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx + 1]),
+                    -1ULL);
         } else if (val >= 65536) {
           changed = 1;
           uint64_t carry = val >> 16;
           atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx]),
                     -static_cast<unsigned long long>(carry << 16));
-          atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx + 1]), carry);
+          atomicAdd(reinterpret_cast<unsigned long long *>(&s_r[local_idx + 1]),
+                    carry);
         }
       }
       changed = __syncthreads_or(changed);
@@ -207,7 +223,7 @@ __global__ void single_block_arbitrary_sub_kernel(uint64_t *r,
     for (int i = 0; i < 4; ++i) {
       int local_idx = tid + i * 1024;
       int global_idx = base + local_idx;
-      if (std::cmp_less(global_idx , n)) {
+      if (global_idx < n) {
         r[global_idx] = s_r[local_idx];
       }
     }
@@ -273,6 +289,43 @@ void launch_forward_ntt_fermat(
   }
 }
 
+__global__ void
+pointwise_multiply_reverse_scale_kernel(uint64_t *out, const uint64_t *a,
+                                        const uint64_t *b, uint64_t inv_n,
+                                        uint64_t modulus_val, size_t n) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx == 0 || idx == n / 2) {
+    unsigned __int128 p = static_cast<unsigned __int128>(a[idx]) * b[idx];
+    p = (p % modulus_val) * inv_n;
+    out[idx] = p % modulus_val;
+  } else if (idx < n / 2) {
+    size_t opp = n - idx;
+    unsigned __int128 p_idx = static_cast<unsigned __int128>(a[idx]) * b[idx];
+    unsigned __int128 p_opp = static_cast<unsigned __int128>(a[opp]) * b[opp];
+
+    p_idx = (p_idx % modulus_val) * inv_n;
+    p_opp = (p_opp % modulus_val) * inv_n;
+
+    out[opp] = p_idx % modulus_val;
+    out[idx] = p_opp % modulus_val;
+  }
+}
+
+void launch_inverse_ntt_fermat_fused(
+    size_t N_val, uint64_t *d_data,
+    const precomputation::Precomputation<MODULUS_BITS> *precomp,
+    const precomputation::ConstantPrecomputation<MODULUS_BITS>
+        &constant_precomp,
+    cudaStream_t stream) {
+  int threads = 256;
+  int blocks = (N_val + threads - 1) / threads;
+  int shift = (N_val == 65536) ? 16 : 20;
+
+  bit_reverse_permute<<<blocks, threads, 0, stream>>>(d_data, N_val, shift);
+  launch_forward_ntt_fermat(N_val, d_data, precomp, constant_precomp, stream);
+  bit_reverse_permute<<<blocks, threads, 0, stream>>>(d_data, N_val, shift);
+}
+
 void launch_inverse_ntt_fermat(
     size_t N_val, uint64_t *d_data, uint64_t inv_n, uint64_t modulus,
     const precomputation::Precomputation<MODULUS_BITS> *precomp,
@@ -300,12 +353,12 @@ auto read_prime(const char *file, size_t target_bits, size_t tolerance,
   std::ifstream f(file);
   if (!f.is_open()) {
     return false;
-}
+  }
   std::string line;
   while (std::getline(f, line)) {
     if (line.empty() || line[0] == '#') {
       continue;
-}
+    }
     mpz_t p;
     mpz_init_set_str(p, line.c_str(), 10);
     size_t bits = mpz_sizeinbase(p, 2);
@@ -335,9 +388,69 @@ void limbs_to_gmp(const std::vector<uint64_t> &limbs, mpz_t x, size_t N_val) {
   std::vector<uint16_t> short_limbs(N_val);
   for (size_t i = 0; i < N_val; i++) {
     short_limbs[i] = static_cast<uint16_t>(limbs[i]);
-}
+  }
   mpz_import(x, N_val, -1, sizeof(uint16_t), 0, 0, short_limbs.data());
 }
+
+struct StreamContext {
+  cudaStream_t stream;
+  cudaGraph_t graph;
+  cudaGraphExec_t instance;
+  cudaEvent_t start;
+  cudaEvent_t stop;
+  cudaEvent_t ntt_start[9], ntt_end[9];
+  cudaEvent_t pw_start[3], pw_end[3];
+  cudaEvent_t carry_start[4], carry_end[4];
+
+  thrust::device_vector<uint64_t> d_P;
+  thrust::device_vector<uint64_t> d_P_freq;
+  thrust::device_vector<uint64_t> d_mu_freq;
+  thrust::device_vector<uint64_t> d_X;
+  thrust::device_vector<uint64_t> d_T;
+  thrust::device_vector<uint64_t> d_Q;
+  thrust::device_vector<uint64_t> d_Z1;
+  thrust::device_vector<uint64_t> d_Z2;
+
+  bool initialized;
+
+  StreamContext() : initialized(false) {
+    cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    for (int i = 0; i < 9; i++) {
+      cudaEventCreate(&ntt_start[i]);
+      cudaEventCreate(&ntt_end[i]);
+    }
+    for (int i = 0; i < 3; i++) {
+      cudaEventCreate(&pw_start[i]);
+      cudaEventCreate(&pw_end[i]);
+    }
+    for (int i = 0; i < 4; i++) {
+      cudaEventCreate(&carry_start[i]);
+      cudaEventCreate(&carry_end[i]);
+    }
+  }
+
+  void init(size_t N_val) {
+    if (!initialized || d_P.size() != N_val) {
+      d_P.resize(N_val);
+      d_P_freq.resize(N_val);
+      d_mu_freq.resize(N_val);
+      d_X.resize(N_val);
+      d_T.resize(N_val);
+      d_Q.resize(N_val);
+      d_Z1.resize(N_val);
+      d_Z2.resize(N_val);
+      initialized = true;
+    }
+  }
+
+  ~StreamContext() {
+    cudaStreamDestroy(stream);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+  }
+};
 
 auto run_fermat_pipeline(
     mpz_t p, size_t /*bit_len*/, size_t d, size_t N_val, uint64_t inv_n,
@@ -345,9 +458,10 @@ auto run_fermat_pipeline(
     const precomputation::Precomputation<MODULUS_BITS> *precomp_device_ptr,
     const precomputation::ConstantPrecomputation<MODULUS_BITS>
         &constant_precomp,
+    StreamContext &ctx,
     const std::vector<uint64_t> &h_P_in = std::vector<uint64_t>(),
     const std::vector<uint64_t> &h_mu_in = std::vector<uint64_t>(),
-    const std::string& prefix_string = "") -> bool {
+    const std::string &prefix_string = "") -> bool {
   std::vector<uint64_t> h_P = h_P_in;
   std::vector<uint64_t> h_mu = h_mu_in;
 
@@ -371,18 +485,26 @@ auto run_fermat_pipeline(
   gmp_to_limbs(x, h_x, N_val);
   mpz_clear(x);
 
-  thrust::device_vector<uint64_t> d_P = h_P;
-  thrust::device_vector<uint64_t> d_P_freq = h_P;
-  thrust::device_vector<uint64_t> d_mu_freq = h_mu;
-  thrust::device_vector<uint64_t> d_X = h_x;
+  ctx.init(N_val);
+  ctx.d_P = h_P;
+  ctx.d_P_freq = h_P;
+  ctx.d_mu_freq = h_mu;
+  ctx.d_X = h_x;
 
-  thrust::device_vector<uint64_t> d_T(N_val, 0);
-  thrust::device_vector<uint64_t> d_Q(N_val, 0);
-  thrust::device_vector<uint64_t> d_Z1(N_val, 0);
-  thrust::device_vector<uint64_t> d_Z2(N_val, 0);
+  thrust::device_vector<uint64_t> &d_P = ctx.d_P;
+  thrust::device_vector<uint64_t> &d_P_freq = ctx.d_P_freq;
+  thrust::device_vector<uint64_t> &d_mu_freq = ctx.d_mu_freq;
+  thrust::device_vector<uint64_t> &d_X = ctx.d_X;
+  thrust::device_vector<uint64_t> &d_T = ctx.d_T;
+  thrust::device_vector<uint64_t> &d_Q = ctx.d_Q;
+  thrust::device_vector<uint64_t> &d_Z1 = ctx.d_Z1;
+  thrust::device_vector<uint64_t> &d_Z2 = ctx.d_Z2;
 
-  cudaStream_t stream;
-  cudaStreamCreate(&stream);
+  cudaStream_t stream = ctx.stream;
+  cudaGraph_t &graph = ctx.graph;
+  cudaGraphExec_t &instance = ctx.instance;
+  cudaEvent_t start = ctx.start;
+  cudaEvent_t stop = ctx.stop;
 
   int threads = 256;
   int blocks = (N_val + threads - 1) / threads;
@@ -397,9 +519,7 @@ auto run_fermat_pipeline(
   mpz_sub_ui(p_minus_1, p, 1);
   size_t actual_bit_len = mpz_sizeinbase(p_minus_1, 2);
 
-  cudaGraph_t graph;
-  cudaGraphExec_t instance;
-  cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+  cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
 
   uint64_t *raw_X = thrust::raw_pointer_cast(d_X.data());
   uint64_t *raw_T = thrust::raw_pointer_cast(d_T.data());
@@ -414,24 +534,40 @@ auto run_fermat_pipeline(
   // Step 1: T = X^2
   cudaMemcpyAsync(raw_T, raw_X, N_val * sizeof(uint64_t),
                   cudaMemcpyDeviceToDevice, stream);
+  cudaEventRecord(ctx.ntt_start[0], stream);
   launch_forward_ntt_fermat(N_val, raw_T, precomp_device_ptr, constant_precomp,
                             stream);
-  pointwise_multiply_scaled<<<blocks, threads, 0, stream>>>(
+  cudaEventRecord(ctx.ntt_end[0], stream);
+  cudaEventRecord(ctx.pw_start[0], stream);
+  pointwise_multiply_reverse_scale_kernel<<<blocks, threads, 0, stream>>>(
       raw_T, raw_T, raw_T, inv_n, mod_val, N_val);
-  launch_inverse_ntt_fermat(N_val, raw_T, inv_n, mod_val, precomp_device_ptr,
-                            constant_precomp, stream);
+  cudaEventRecord(ctx.pw_end[0], stream);
+  cudaEventRecord(ctx.ntt_start[1], stream);
+  launch_inverse_ntt_fermat_fused(N_val, raw_T, precomp_device_ptr,
+                                  constant_precomp, stream);
+  cudaEventRecord(ctx.ntt_end[1], stream);
+  cudaEventRecord(ctx.carry_start[0], stream);
   launch_resolve_carries(raw_T, N_val, stream);
+  cudaEventRecord(ctx.carry_end[0], stream);
 
   // Step 2: Q = floor(T / B^(d-1)) * mu
   shift_right_kernel<<<blocks, threads, 0, stream>>>(raw_Z1, raw_T, d - 1,
                                                      N_val);
+  cudaEventRecord(ctx.ntt_start[2], stream);
   launch_forward_ntt_fermat(N_val, raw_Z1, precomp_device_ptr, constant_precomp,
                             stream);
-  pointwise_multiply_scaled<<<blocks, threads, 0, stream>>>(
+  cudaEventRecord(ctx.ntt_end[2], stream);
+  cudaEventRecord(ctx.pw_start[1], stream);
+  pointwise_multiply_reverse_scale_kernel<<<blocks, threads, 0, stream>>>(
       raw_Z1, raw_Z1, raw_mu_freq, inv_n, mod_val, N_val);
-  launch_inverse_ntt_fermat(N_val, raw_Z1, inv_n, mod_val, precomp_device_ptr,
-                            constant_precomp, stream);
+  cudaEventRecord(ctx.pw_end[1], stream);
+  cudaEventRecord(ctx.ntt_start[3], stream);
+  launch_inverse_ntt_fermat_fused(N_val, raw_Z1, precomp_device_ptr,
+                                  constant_precomp, stream);
+  cudaEventRecord(ctx.ntt_end[3], stream);
+  cudaEventRecord(ctx.carry_start[1], stream);
   launch_resolve_carries(raw_Z1, N_val, stream);
+  cudaEventRecord(ctx.carry_end[1], stream);
 
   // Step 3: Q = Q / B^(d+1)
   shift_right_kernel<<<blocks, threads, 0, stream>>>(raw_Q, raw_Z1, d + 1,
@@ -440,27 +576,34 @@ auto run_fermat_pipeline(
   // Step 4: Z2 = Q * P
   cudaMemcpyAsync(raw_Z2, raw_Q, N_val * sizeof(uint64_t),
                   cudaMemcpyDeviceToDevice, stream);
+  cudaEventRecord(ctx.ntt_start[4], stream);
   launch_forward_ntt_fermat(N_val, raw_Z2, precomp_device_ptr, constant_precomp,
                             stream);
-  pointwise_multiply_scaled<<<blocks, threads, 0, stream>>>(
+  cudaEventRecord(ctx.ntt_end[4], stream);
+  cudaEventRecord(ctx.pw_start[2], stream);
+  pointwise_multiply_reverse_scale_kernel<<<blocks, threads, 0, stream>>>(
       raw_Z2, raw_Z2, raw_P_freq, inv_n, mod_val, N_val);
-  launch_inverse_ntt_fermat(N_val, raw_Z2, inv_n, mod_val, precomp_device_ptr,
-                            constant_precomp, stream);
+  cudaEventRecord(ctx.pw_end[2], stream);
+  cudaEventRecord(ctx.ntt_start[5], stream);
+  launch_inverse_ntt_fermat_fused(N_val, raw_Z2, precomp_device_ptr,
+                                  constant_precomp, stream);
+  cudaEventRecord(ctx.ntt_end[5], stream);
+  cudaEventRecord(ctx.carry_start[2], stream);
   launch_resolve_carries(raw_Z2, N_val, stream);
+  cudaEventRecord(ctx.carry_end[2], stream);
 
   // Step 5: R = T - Z2
+  cudaEventRecord(ctx.carry_start[3], stream);
   launch_sub_kernel(raw_X, raw_T, raw_Z2, N_val, stream);
-
   single_block_arbitrary_conditional_sub_p_kernel<<<1, 1024, 0, stream>>>(
-      raw_X, raw_P, d, N_val);
+      raw_X, raw_P, d, N_val, false);
+  cudaEventRecord(ctx.carry_end[3], stream);
 
   cudaStreamEndCapture(stream, &graph);
   cudaGraphInstantiate(&instance, graph, nullptr, nullptr, 0);
 
-  cudaEvent_t start, stop;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
   cudaEventRecord(start, stream);
+  auto cand_start = std::chrono::steady_clock::now();
 
   int squarings = 0;
   int multiplies = 0;
@@ -469,30 +612,50 @@ auto run_fermat_pipeline(
   int twenty_percent = total_steps / 5;
   if (twenty_percent == 0) {
     twenty_percent = 1;
-}
+  }
 
   for (int i = actual_bit_len - 2; i >= 0; --i) {
     cudaGraphLaunch(instance, stream);
     squarings++;
 
     if (mpz_tstbit(p_minus_1, i)) {
-      mul_2_kernel<<<blocks, threads, 0, stream>>>(raw_X, raw_T, N_val);
-      cudaMemcpyAsync(raw_X, raw_T, N_val * sizeof(uint64_t),
-                      cudaMemcpyDeviceToDevice, stream);
       single_block_arbitrary_conditional_sub_p_kernel<<<1, 1024, 0, stream>>>(
-          raw_X, raw_P, d, N_val);
+          raw_X, raw_P, d, N_val, true);
       multiplies++;
     }
 
     int one_percent = std::max<int>(1, total_steps / 100);
     if (squarings % one_percent == 0 || squarings == total_steps) {
-      cudaStreamSynchronize(stream);
       int pct = (squarings * 100) / total_steps;
-      if (prefix_string.empty()) {
-        std::cout << "\rProgress: " << pct << "% (" << squarings << "/" << total_steps << " squarings)" << std::flush;
-      } else {
-        std::cout << "\r" << prefix_string << " | SQ " << total_steps << " : "
-                  << std::setw(6) << squarings << " | " << std::setw(3) << pct << "%" << std::flush;
+
+      auto now = std::chrono::steady_clock::now();
+      auto uptime_sec = std::chrono::duration_cast<std::chrono::seconds>(
+                            now - get_program_start())
+                            .count();
+      auto cand_sec =
+          std::chrono::duration_cast<std::chrono::seconds>(now - cand_start)
+              .count();
+      int u_h = uptime_sec / 3600;
+      int u_m = (uptime_sec % 3600) / 60;
+      int u_s = uptime_sec % 60;
+      int c_m = cand_sec / 60;
+      int c_s = cand_sec % 60;
+      char time_buf[64];
+      snprintf(time_buf, sizeof(time_buf), "[%02d:%02d:%02d %02d:%02d] ", u_h,
+               u_m, u_s, c_m, c_s);
+
+      {
+        std::lock_guard<std::mutex> lock(get_print_mutex());
+        if (prefix_string.empty()) {
+          std::cout << time_buf << "Progress: " << pct << "% (" << squarings
+                    << "/" << total_steps << " squarings)\n"
+                    << std::flush;
+        } else {
+          std::cout << time_buf << prefix_string << " | SQ " << total_steps
+                    << " : " << std::setw(6) << squarings << " | "
+                    << std::setw(3) << pct << "%\n"
+                    << std::flush;
+        }
       }
     }
   }
@@ -527,10 +690,9 @@ auto run_fermat_pipeline(
   mpz_clear(p_minus_1);
   mpz_clear(mu);
   mpz_clear(B_2d);
+
   cudaGraphExecDestroy(instance);
   cudaGraphDestroy(graph);
-  cudaStreamDestroy(stream);
-
   return is_prime;
 }
 
@@ -571,9 +733,8 @@ struct Candidate {
   ~Candidate() { mpz_clear(p); }
 };
 
-auto prepare_next_candidate(mpz_t K,
-                                 const std::vector<uint64_t> &sieve_primes,
-                                 std::mt19937_64 &rng) -> Candidate {
+auto prepare_next_candidate(mpz_t K, const std::vector<uint64_t> &sieve_primes,
+                            std::mt19937_64 &rng) -> Candidate {
   Candidate c;
   std::uniform_int_distribution<size_t> dist(0, sieve_primes.size() - 1);
   c.q_val = sieve_primes[dist(rng)];
@@ -586,7 +747,7 @@ auto prepare_next_candidate(mpz_t K,
     c.N_val = 4096;
   } else {
     c.N_val = 65536;
-}
+  }
 
   mpz_t B_2d, mu;
   mpz_init(B_2d);
@@ -608,6 +769,7 @@ auto prepare_next_candidate(mpz_t K,
 // Main
 // -------------------------------------------------------------------------
 auto main(int argc, char **argv) -> int {
+  get_program_start();
   std::cout << "Starting Fermat Harness" << '\n';
   // Set up NTT field
   const polyarith::Modulus modulus(UINT64_C(0x1fff'fff9'0000'0001), 3);
@@ -633,7 +795,7 @@ auto main(int argc, char **argv) -> int {
   size_t target_bits = 258000;
   int target_index = -1;
 
-  std::string primes_file_name = "";
+  std::string primes_file_name = "primes.txt";
   std::string sieve_file_name = "";
   bool is_crunch = false;
 
@@ -648,16 +810,16 @@ auto main(int argc, char **argv) -> int {
     std::string arg = argv[i];
     if (arg == "--file" && i + 1 < argc) {
       filename = argv[++i];
-}
+    }
     if (arg == "--phase" && i + 1 < argc) {
       phase = std::stoi(argv[++i]);
-}
+    }
     if (arg == "--target-bits" && i + 1 < argc) {
       target_bits = std::stoull(argv[++i]);
-}
+    }
     if (arg == "--index" && i + 1 < argc) {
       target_index = std::stoi(argv[++i]);
-}
+    }
     if (arg == "--primes" && i + 1 < argc) {
       primes_file_name = argv[++i];
       is_crunch = true;
@@ -676,7 +838,7 @@ auto main(int argc, char **argv) -> int {
     while (std::getline(pf, line)) {
       if (line.empty() || line[0] == '#') {
         continue;
-}
+      }
       p_strs.push_back(line);
     }
     // sort by length
@@ -700,47 +862,52 @@ auto main(int argc, char **argv) -> int {
     while (std::getline(sf, line)) {
       if (line.empty() || line[0] == '#') {
         continue;
-}
+      }
       sieve_primes.push_back(std::stoull(line));
     }
-    std::cout << "Loaded " << sieve_primes.size() << " sieve primes."
-              << '\n';
+    std::cout << "Loaded " << sieve_primes.size() << " sieve primes." << '\n';
 
-    std::random_device rd;
-    std::mt19937_64 rng(rd());
+    constexpr int BATCH_SIZE = 4;
+    std::vector<StreamContext> stream_ctxs(BATCH_SIZE);
 
-    // Double buffering using future
-    std::future<Candidate> next_cand_future =
-        std::async(std::launch::async, prepare_next_candidate, K,
-                   std::ref(sieve_primes), std::ref(rng));
+    std::mutex file_mutex;
 
-    while (true) {
-      Candidate cand = next_cand_future.get();
-      // start preparing the next one immediately
-      next_cand_future = std::async(std::launch::async, prepare_next_candidate,
-                                    K, std::ref(sieve_primes), std::ref(rng));
+    auto worker_thread = [&](int thread_id) {
+      std::random_device rd;
+      std::mt19937_64 rng(rd() + thread_id);
+      while (true) {
+        Candidate cand = prepare_next_candidate(K, sieve_primes, rng);
+        std::stringstream ss;
+        ss << "T" << thread_id << " Q " << cand.q_val << " (" << cand.bit_len
+           << " bits)";
+        std::string prefix = ss.str();
 
-      auto now = std::chrono::system_clock::to_time_t(
-          std::chrono::system_clock::now());
-      std::stringstream ss;
-      ss << "[" << std::put_time(std::localtime(&now), "%H:%M:%S") << "] Q " 
-         << cand.q_val << " (" << cand.bit_len << " bits)";
-      std::string prefix = ss.str();
+        uint64_t inv_n = modulus.invert(cand.N_val);
+        bool passed = run_fermat_pipeline(
+            cand.p, cand.bit_len, cand.d, cand.N_val, inv_n, modulus,
+            thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
+            stream_ctxs[thread_id], cand.h_P, cand.h_mu, prefix);
 
-      uint64_t inv_n = modulus.invert(cand.N_val);
-      bool passed = run_fermat_pipeline(
-          cand.p, cand.bit_len, cand.d, cand.N_val, inv_n, modulus,
-          thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
-          cand.h_P, cand.h_mu, prefix);
-
-      if (passed) {
-        std::cout << "*** FOUND PROBABLE PRIME! ***" << '\n';
-        std::ofstream outf("found_primes.txt", std::ios::app);
-        outf << "q=" << cand.q_val << " P=";
-        char *p_str = mpz_get_str(nullptr, 10, cand.p);
-        outf << p_str << '\n';
-        free(p_str);
+        if (passed) {
+          std::lock_guard<std::mutex> lock(get_print_mutex());
+          std::cout << "\n*** FOUND PROBABLE PRIME! ***\n";
+          std::lock_guard<std::mutex> flock(file_mutex);
+          std::ofstream outf("found_primes.txt", std::ios::app);
+          outf << "q=" << cand.q_val << " P=";
+          char *p_str = mpz_get_str(nullptr, 10, cand.p);
+          outf << p_str << '\n';
+          free(p_str);
+        }
       }
+    };
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < BATCH_SIZE; ++i) {
+      threads.emplace_back(worker_thread, i);
+    }
+
+    for (auto &t : threads) {
+      t.join();
     }
 
     mpz_clear(P_A);
@@ -763,7 +930,7 @@ auto main(int argc, char **argv) -> int {
     while (std::getline(primes_file, line)) {
       if (line.empty() || line[0] == '#') {
         continue;
-}
+      }
       candidates.push_back(line);
     }
 
@@ -783,7 +950,7 @@ auto main(int argc, char **argv) -> int {
       }
     }
 
-    if (selected_idx < 0 || std::cmp_greater_equal(selected_idx ,candidates.size())) {
+    if (selected_idx < 0 || (size_t)selected_idx >= candidates.size()) {
       std::cout << "Candidate not found!" << '\n';
       return 1;
     }
@@ -800,7 +967,7 @@ auto main(int argc, char **argv) -> int {
       N_val = 4096;
     } else {
       N_val = 65536;
-}
+    }
 
     if (2 * d + 2 > N_val) {
       std::cout << "ERROR: N_val " << N_val
@@ -814,13 +981,13 @@ auto main(int argc, char **argv) -> int {
     std::cout << "exact decimal digit count: " << exact_digits << '\n';
     std::cout << "bit count: " << bit_len << '\n';
     std::cout << "d=" << d
-              << " limbs, max convolution length 2d+2=" << (2 * d + 2)
-              << '\n';
+              << " limbs, max convolution length 2d+2=" << (2 * d + 2) << '\n';
     std::cout << "Chosen N_val: " << N_val
               << " (sufficient zero-padding guaranteed)" << '\n';
 
+    StreamContext ctx;
     run_fermat_pipeline(p, bit_len, d, N_val, inv_n, modulus,
                         thrust::raw_pointer_cast(precomp_device.get()),
-                        constant_precomp);
+                        constant_precomp, ctx);
   }
 }

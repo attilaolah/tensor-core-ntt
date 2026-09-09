@@ -18,10 +18,10 @@
 #include "ntt-reference.hpp"
 #include "polyarith/polyarith.cuh"
 
-static auto
-find_mismatches(const thrust::host_vector<std::uint64_t> &a,
-                const thrust::host_vector<std::uint64_t> &b,
-                const std::uint64_t modulus) -> boost::icl::interval_set<int> {
+static auto find_mismatches(const thrust::host_vector<std::uint64_t> &a,
+                            const thrust::host_vector<std::uint64_t> &b,
+                            const std::uint64_t modulus)
+    -> boost::icl::interval_set<int> {
   boost::icl::interval_set<int> mismatches;
 
 #pragma omp parallel

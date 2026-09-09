@@ -780,6 +780,7 @@ auto prepare_next_candidate(mpz_t K, const std::vector<uint64_t> &sieve_primes) 
   c.q_val = sieve_primes[idx];
 
   mpz_mul_ui(c.p, K, c.q_val);
+  mpz_add_ui(c.p, c.p, 1);
 
   c.bit_len = mpz_sizeinbase(c.p, 2);
   c.d = (c.bit_len + 15) / 16;

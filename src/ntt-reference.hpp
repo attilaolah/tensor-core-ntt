@@ -15,7 +15,7 @@ class NttReference {
 
   std::uint64_t log2m;
   polyarith::Modulus modulus;
-  std::uint64_t omega_m, omegainv_m, minv;
+  std::uint64_t omega_m, minv;
 
 public:
   NttReference(void) = default;
@@ -30,7 +30,6 @@ public:
     log2m = std::countr_zero(m);
     modulus = polyarith::Modulus(N, generator);
     omega_m = modulus.get_root_forward(m);
-    omegainv_m = modulus.get_root_inverse(m);
     minv = modulus.invert(m);
   }
 
@@ -74,7 +73,6 @@ public:
       dst[i] = modulus.multiply(src[i], minv);
     }
 
-    std::uint64_t omegainv_2l = omegainv_m;
     std::vector<std::uint64_t> omegainv_2l_j_table;
     omegainv_2l_j_table.reserve(std::uint64_t(1) << (log2m - 1));
 
@@ -84,7 +82,8 @@ public:
 
 #pragma omp parallel for
       for (std::uint64_t j = 0; j < l; ++j) {
-        omegainv_2l_j_table[j] = modulus.power(omegainv_2l, j);
+        omegainv_2l_j_table[j] =
+            modulus.power(modulus.get_root_inverse(2 * l), j);
       }
 
 #pragma omp parallel for collapse(2)

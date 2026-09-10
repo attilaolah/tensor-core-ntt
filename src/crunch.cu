@@ -15,7 +15,6 @@ inline auto get_program_start() {
   return start;
 }
 
-
 struct ThreadState {
   uint64_t q_val = 0;
   int pct = 0;
@@ -23,12 +22,12 @@ struct ThreadState {
   bool is_running = false;
 };
 
-inline std::vector<ThreadState>& get_global_thread_states() {
+inline std::vector<ThreadState> &get_global_thread_states() {
   static std::vector<ThreadState> states(4);
   return states;
 }
 
-inline std::mutex& get_state_mutex() {
+inline std::mutex &get_state_mutex() {
   static std::mutex state_mutex;
   return state_mutex;
 }
@@ -69,9 +68,9 @@ __global__ void mul_2_kernel(const uint64_t *in, uint64_t *out, size_t n) {
   }
 }
 
-__global__ void pointwise_multiply_scaled(uint64_t *out, const uint64_t *a,
-                                          const uint64_t *b, uint64_t inv_n,
-                                          uint64_t modulus_val, size_t n) {
+__global__ void pointwise_multiply(uint64_t *out, const uint64_t *a,
+                                   const uint64_t *b, uint64_t modulus_val,
+                                   size_t n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < n) {
     unsigned __int128 p1 = static_cast<unsigned __int128>(a[idx]) * b[idx];
@@ -79,34 +78,39 @@ __global__ void pointwise_multiply_scaled(uint64_t *out, const uint64_t *a,
   }
 }
 
-__global__ void bit_reverse_permute(uint64_t *data, size_t n, int shift) {
-  uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < n) {
-    uint32_t rev = __brev(idx) >> shift;
-    if (idx < rev) {
-      uint64_t tmp = data[idx];
-      data[idx] = data[rev];
-      data[rev] = tmp;
-    }
+// The forward tensor-core transform is a decimation-in-frequency transform,
+// so its output is bit-reversed.  This is the matching decimation-in-time
+// inverse: ascending stages consume that ordering and restore natural order.
+// Stages are separate kernels because CUDA provides no grid-wide barrier.
+__global__ void inverse_ntt_dit_stage(uint64_t *data,
+                                      const uint64_t *inverse_powers,
+                                      uint64_t modulus_val, size_t n,
+                                      size_t half) {
+  const size_t butterfly = blockIdx.x * blockDim.x + threadIdx.x;
+  if (butterfly >= n / 2) {
+    return;
   }
+  const size_t j = butterfly % half;
+  const size_t group = butterfly / half;
+  const size_t first = group * (half * 2) + j;
+  const size_t second = first + half;
+  const size_t stride = n / (half * 2);
+  const uint64_t twiddle = inverse_powers[j * stride];
+  // Tensor-core forward stages may deliberately leave values unreduced.
+  // DIT butterflies require canonical operands for their overflow-free add.
+  const uint64_t x0 = data[first] % modulus_val;
+  const uint64_t x1 = static_cast<unsigned __int128>(data[second]) * twiddle %
+                      modulus_val;
+  data[first] = x0 >= modulus_val - x1 ? x0 - (modulus_val - x1) : x0 + x1;
+  data[second] = x0 >= x1 ? x0 - x1 : x0 + modulus_val - x1;
 }
 
-__global__ void reverse_and_scale(uint64_t *data, uint64_t inv_n,
+__global__ void inverse_ntt_scale(uint64_t *data, uint64_t inv_n,
                                   uint64_t modulus_val, size_t n) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx == 0 || idx == n / 2) {
-    unsigned __int128 p = static_cast<unsigned __int128>(data[idx]) * inv_n;
-    data[idx] = p % modulus_val;
-  } else if (idx < n / 2) {
-    size_t opp = n - idx;
-    uint64_t val_idx = data[idx];
-    uint64_t val_opp = data[opp];
-
-    unsigned __int128 p1 = static_cast<unsigned __int128>(val_opp) * inv_n;
-    unsigned __int128 p2 = static_cast<unsigned __int128>(val_idx) * inv_n;
-
-    data[idx] = p1 % modulus_val;
-    data[opp] = p2 % modulus_val;
+  const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < n) {
+    data[index] = static_cast<unsigned __int128>(data[index]) * inv_n %
+                  modulus_val;
   }
 }
 
@@ -308,60 +312,35 @@ void launch_forward_ntt_fermat(
   }
 }
 
-__global__ void
-pointwise_multiply_reverse_scale_kernel(uint64_t *out, const uint64_t *a,
-                                        const uint64_t *b, uint64_t inv_n,
-                                        uint64_t modulus_val, size_t n) {
+__global__ void pointwise_multiply_kernel(uint64_t *out, const uint64_t *a,
+                                          const uint64_t *b,
+                                          uint64_t modulus_val, size_t n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx == 0 || idx == n / 2) {
-    unsigned __int128 p = static_cast<unsigned __int128>(a[idx]) * b[idx];
-    p = (p % modulus_val) * inv_n;
-    out[idx] = p % modulus_val;
-  } else if (idx < n / 2) {
-    size_t opp = n - idx;
-    unsigned __int128 p_idx = static_cast<unsigned __int128>(a[idx]) * b[idx];
-    unsigned __int128 p_opp = static_cast<unsigned __int128>(a[opp]) * b[opp];
-
-    p_idx = (p_idx % modulus_val) * inv_n;
-    p_opp = (p_opp % modulus_val) * inv_n;
-
-    out[opp] = p_idx % modulus_val;
-    out[idx] = p_opp % modulus_val;
+  if (idx < n) {
+    out[idx] = static_cast<unsigned __int128>(a[idx]) * b[idx] % modulus_val;
   }
 }
 
 void launch_inverse_ntt_fermat_fused(
     size_t N_val, uint64_t *d_data,
-    const precomputation::Precomputation<MODULUS_BITS> *precomp,
-    const precomputation::ConstantPrecomputation<MODULUS_BITS>
-        &constant_precomp,
+    const uint64_t *inverse_powers, uint64_t inv_n, uint64_t modulus,
     cudaStream_t stream) {
   int threads = 256;
   int blocks = (N_val + threads - 1) / threads;
-  int shift = (N_val == 65536) ? 16 : 20;
-
-  bit_reverse_permute<<<blocks, threads, 0, stream>>>(d_data, N_val, shift);
-  launch_forward_ntt_fermat(N_val, d_data, precomp, constant_precomp, stream);
-  bit_reverse_permute<<<blocks, threads, 0, stream>>>(d_data, N_val, shift);
+  for (size_t half = 1; half < N_val; half <<= 1) {
+    inverse_ntt_dit_stage<<<blocks, threads, 0, stream>>>(
+        d_data, inverse_powers, modulus, N_val, half);
+  }
+  inverse_ntt_scale<<<blocks, threads, 0, stream>>>(d_data, inv_n, modulus,
+                                                      N_val);
 }
 
 void launch_inverse_ntt_fermat(
     size_t N_val, uint64_t *d_data, uint64_t inv_n, uint64_t modulus,
-    const precomputation::Precomputation<MODULUS_BITS> *precomp,
-    const precomputation::ConstantPrecomputation<MODULUS_BITS>
-        &constant_precomp,
+    const uint64_t *inverse_powers,
     cudaStream_t stream) {
-  int threads = 256;
-  int blocks = (N_val + threads - 1) / threads;
-
-  int shift = (N_val == 65536) ? 16 : 20;
-
-  bit_reverse_permute<<<blocks, threads, 0, stream>>>(d_data, N_val, shift);
-  launch_forward_ntt_fermat(N_val, d_data, precomp, constant_precomp, stream);
-  bit_reverse_permute<<<blocks, threads, 0, stream>>>(d_data, N_val, shift);
-
-  reverse_and_scale<<<blocks, threads, 0, stream>>>(d_data, inv_n, modulus,
-                                                    N_val);
+  launch_inverse_ntt_fermat_fused(N_val, d_data, inverse_powers, inv_n,
+                                  modulus, stream);
 }
 
 // -------------------------------------------------------------------------
@@ -429,6 +408,7 @@ struct StreamContext {
   thrust::device_vector<uint64_t> d_Q;
   thrust::device_vector<uint64_t> d_Z1;
   thrust::device_vector<uint64_t> d_Z2;
+  thrust::device_vector<uint64_t> d_inverse_powers;
 
   bool initialized;
 
@@ -460,6 +440,7 @@ struct StreamContext {
       d_Q.resize(N_val);
       d_Z1.resize(N_val);
       d_Z2.resize(N_val);
+      d_inverse_powers.resize(N_val / 2);
       initialized = true;
     }
   }
@@ -481,7 +462,8 @@ auto run_fermat_pipeline(
     const std::vector<uint64_t> &h_P_in = std::vector<uint64_t>(),
     const std::vector<uint64_t> &h_mu_in = std::vector<uint64_t>(),
     int thread_id = 0, uint64_t q_val = 0) -> bool {
-  (void)bit_len; std::vector<uint64_t> h_P = h_P_in;
+  (void)bit_len;
+  std::vector<uint64_t> h_P = h_P_in;
   std::vector<uint64_t> h_mu = h_mu_in;
 
   mpz_t B_2d, mu;
@@ -505,6 +487,14 @@ auto run_fermat_pipeline(
   mpz_clear(x);
 
   ctx.init(N_val);
+  std::vector<uint64_t> h_inverse_powers(N_val / 2);
+  uint64_t inverse_power = 1;
+  const uint64_t inverse_root = modulus.get_root_inverse(N_val);
+  for (size_t index = 0; index < h_inverse_powers.size(); ++index) {
+    h_inverse_powers[index] = inverse_power;
+    inverse_power = modulus.multiply(inverse_power, inverse_root);
+  }
+  ctx.d_inverse_powers = h_inverse_powers;
   ctx.d_P = h_P;
   ctx.d_P_freq = h_P;
   ctx.d_mu_freq = h_mu;
@@ -548,6 +538,8 @@ auto run_fermat_pipeline(
   uint64_t *raw_mu_freq = thrust::raw_pointer_cast(d_mu_freq.data());
   uint64_t *raw_P_freq = thrust::raw_pointer_cast(d_P_freq.data());
   uint64_t *raw_P = thrust::raw_pointer_cast(d_P.data());
+  const uint64_t *raw_inverse_powers =
+      thrust::raw_pointer_cast(ctx.d_inverse_powers.data());
   uint64_t mod_val = modulus.get_modulus();
 
   // Step 1: T = X^2
@@ -558,12 +550,13 @@ auto run_fermat_pipeline(
                             stream);
   cudaEventRecord(ctx.ntt_end[0], stream);
   cudaEventRecord(ctx.pw_start[0], stream);
-  pointwise_multiply_reverse_scale_kernel<<<blocks, threads, 0, stream>>>(
-      raw_T, raw_T, raw_T, inv_n, mod_val, N_val);
+  pointwise_multiply_kernel<<<blocks, threads, 0, stream>>>(raw_T, raw_T,
+                                                              raw_T, mod_val,
+                                                              N_val);
   cudaEventRecord(ctx.pw_end[0], stream);
   cudaEventRecord(ctx.ntt_start[1], stream);
-  launch_inverse_ntt_fermat_fused(N_val, raw_T, precomp_device_ptr,
-                                  constant_precomp, stream);
+  launch_inverse_ntt_fermat_fused(N_val, raw_T, raw_inverse_powers, inv_n,
+                                  mod_val, stream);
   cudaEventRecord(ctx.ntt_end[1], stream);
   cudaEventRecord(ctx.carry_start[0], stream);
   launch_resolve_carries(raw_T, N_val, stream);
@@ -577,12 +570,12 @@ auto run_fermat_pipeline(
                             stream);
   cudaEventRecord(ctx.ntt_end[2], stream);
   cudaEventRecord(ctx.pw_start[1], stream);
-  pointwise_multiply_reverse_scale_kernel<<<blocks, threads, 0, stream>>>(
-      raw_Z1, raw_Z1, raw_mu_freq, inv_n, mod_val, N_val);
+  pointwise_multiply_kernel<<<blocks, threads, 0, stream>>>(
+      raw_Z1, raw_Z1, raw_mu_freq, mod_val, N_val);
   cudaEventRecord(ctx.pw_end[1], stream);
   cudaEventRecord(ctx.ntt_start[3], stream);
-  launch_inverse_ntt_fermat_fused(N_val, raw_Z1, precomp_device_ptr,
-                                  constant_precomp, stream);
+  launch_inverse_ntt_fermat_fused(N_val, raw_Z1, raw_inverse_powers, inv_n,
+                                  mod_val, stream);
   cudaEventRecord(ctx.ntt_end[3], stream);
   cudaEventRecord(ctx.carry_start[1], stream);
   launch_resolve_carries(raw_Z1, N_val, stream);
@@ -600,12 +593,12 @@ auto run_fermat_pipeline(
                             stream);
   cudaEventRecord(ctx.ntt_end[4], stream);
   cudaEventRecord(ctx.pw_start[2], stream);
-  pointwise_multiply_reverse_scale_kernel<<<blocks, threads, 0, stream>>>(
-      raw_Z2, raw_Z2, raw_P_freq, inv_n, mod_val, N_val);
+  pointwise_multiply_kernel<<<blocks, threads, 0, stream>>>(
+      raw_Z2, raw_Z2, raw_P_freq, mod_val, N_val);
   cudaEventRecord(ctx.pw_end[2], stream);
   cudaEventRecord(ctx.ntt_start[5], stream);
-  launch_inverse_ntt_fermat_fused(N_val, raw_Z2, precomp_device_ptr,
-                                  constant_precomp, stream);
+  launch_inverse_ntt_fermat_fused(N_val, raw_Z2, raw_inverse_powers, inv_n,
+                                  mod_val, stream);
   cudaEventRecord(ctx.ntt_end[5], stream);
   cudaEventRecord(ctx.carry_start[2], stream);
   launch_resolve_carries(raw_Z2, N_val, stream);
@@ -622,7 +615,8 @@ auto run_fermat_pipeline(
   cudaGraphInstantiate(&instance, graph, nullptr, nullptr, 0);
 
   cudaEventRecord(start, stream);
-  (void)bit_len; (void)q_val;
+  (void)bit_len;
+  (void)q_val;
 
   int squarings = 0;
   int multiplies = 0;
@@ -649,28 +643,34 @@ auto run_fermat_pipeline(
 
       if (pct < 100) {
         std::lock_guard<std::mutex> lock(get_state_mutex());
-        auto& states = get_global_thread_states();
+        auto &states = get_global_thread_states();
         if ((size_t)thread_id < states.size()) {
           states[thread_id].pct = pct;
         }
 
         auto now = std::chrono::steady_clock::now();
-        auto uptime_sec = std::chrono::duration_cast<std::chrono::seconds>(now - get_program_start()).count();
+        auto uptime_sec = std::chrono::duration_cast<std::chrono::seconds>(
+                              now - get_program_start())
+                              .count();
         int u_h = uptime_sec / 3600;
         int u_m = (uptime_sec % 3600) / 60;
         int u_s = uptime_sec % 60;
 
         char uptime_buf[64];
-        snprintf(uptime_buf, sizeof(uptime_buf), "\r[%02d:%02d:%02d]", u_h, u_m, u_s);
+        snprintf(uptime_buf, sizeof(uptime_buf), "\r[%02d:%02d:%02d]", u_h, u_m,
+                 u_s);
         std::cout << uptime_buf;
 
         for (size_t t = 0; t < states.size(); t++) {
           if (states[t].is_running) {
-            auto cand_sec = std::chrono::duration_cast<std::chrono::seconds>(now - states[t].cand_start).count();
+            auto cand_sec = std::chrono::duration_cast<std::chrono::seconds>(
+                                now - states[t].cand_start)
+                                .count();
             int c_m = cand_sec / 60;
             int c_s = cand_sec % 60;
             char cand_buf[64];
-            snprintf(cand_buf, sizeof(cand_buf), " [%lu %02d:%02d %02d%%]", states[t].q_val, c_m, c_s, states[t].pct);
+            snprintf(cand_buf, sizeof(cand_buf), " [%lu %02d:%02d %02d%%]",
+                     states[t].q_val, c_m, c_s, states[t].pct);
             std::cout << cand_buf;
           }
         }
@@ -703,19 +703,31 @@ auto run_fermat_pipeline(
   }
   {
     std::lock_guard<std::mutex> lock(get_state_mutex());
-    auto& states = get_global_thread_states();
+    auto &states = get_global_thread_states();
     if ((size_t)thread_id < states.size()) {
       states[thread_id].is_running = false;
     }
-    std::cout << "\r                                                                                                                                  \r";
+    std::cout << "\r                                                           "
+                 "                                                             "
+                 "          \r";
     auto now = std::chrono::steady_clock::now();
-    auto uptime_sec = std::chrono::duration_cast<std::chrono::seconds>(now - get_program_start()).count();
-    auto cand_sec = std::chrono::duration_cast<std::chrono::seconds>(now - states[thread_id].cand_start).count();
-    int u_h = uptime_sec / 3600; int u_m = (uptime_sec % 3600) / 60; int u_s = uptime_sec % 60;
-    int c_m = cand_sec / 60; int c_s = cand_sec % 60;
+    auto uptime_sec = std::chrono::duration_cast<std::chrono::seconds>(
+                          now - get_program_start())
+                          .count();
+    auto cand_sec = std::chrono::duration_cast<std::chrono::seconds>(
+                        now - states[thread_id].cand_start)
+                        .count();
+    int u_h = uptime_sec / 3600;
+    int u_m = (uptime_sec % 3600) / 60;
+    int u_s = uptime_sec % 60;
+    int c_m = cand_sec / 60;
+    int c_s = cand_sec % 60;
     char time_buf[64];
-    snprintf(time_buf, sizeof(time_buf), "[%02d:%02d:%02d %02d:%02d] ", u_h, u_m, u_s, c_m, c_s);
-    std::cout << time_buf << "Q " << q_val << " (" << mpz_sizeinbase(p, 2) << " bits) | SQ " << total_steps << " | 100% | " << result_msg << "\n";
+    snprintf(time_buf, sizeof(time_buf), "[%02d:%02d:%02d %02d:%02d] ", u_h,
+             u_m, u_s, c_m, c_s);
+    std::cout << time_buf << "Q " << q_val << " (" << mpz_sizeinbase(p, 2)
+              << " bits) | SQ " << total_steps << " | 100% | " << result_msg
+              << "\n";
   }
   mpz_clear(final_val);
   mpz_clear(p_minus_1);
@@ -764,13 +776,13 @@ struct Candidate {
   ~Candidate() { mpz_clear(p); }
 };
 
-
-inline std::atomic<size_t>& get_candidate_index() {
+inline std::atomic<size_t> &get_candidate_index() {
   static std::atomic<size_t> idx{0};
   return idx;
 }
 
-auto prepare_next_candidate(mpz_t K, const std::vector<uint64_t> &sieve_primes) -> Candidate {
+auto prepare_next_candidate(mpz_t K, const std::vector<uint64_t> &sieve_primes)
+    -> Candidate {
   Candidate c;
   size_t idx = get_candidate_index().fetch_add(1);
   if (idx >= sieve_primes.size()) {
@@ -806,6 +818,91 @@ auto prepare_next_candidate(mpz_t K, const std::vector<uint64_t> &sieve_primes) 
   return c;
 }
 
+auto is_decimal(const std::string &value) -> bool {
+  return !value.empty() &&
+         std::all_of(value.begin(), value.end(), [](unsigned char character) {
+           return character >= '0' && character <= '9';
+         });
+}
+
+auto read_ordered_lines(const std::string &path,
+                        std::vector<std::string> &values, const char *kind,
+                        bool allow_empty = false) -> bool {
+  std::ifstream input(path);
+  if (!input.is_open()) {
+    std::cerr << "ERROR unable to open " << kind << " file: " << path << '\n';
+    return false;
+  }
+  std::string line;
+  while (std::getline(input, line)) {
+    if (!is_decimal(line) || (line.size() > 1 && line.front() == '0')) {
+      std::cerr << "ERROR malformed " << kind << " entry\n";
+      return false;
+    }
+    values.push_back(line);
+  }
+  if (input.bad() || (values.empty() && !allow_empty)) {
+    std::cerr << "ERROR empty or unreadable " << kind << " file\n";
+    return false;
+  }
+  return true;
+}
+
+auto run_ntt_differential(
+    size_t N_val, const polyarith::Modulus &modulus,
+    const precomputation::Precomputation<MODULUS_BITS> *precomp_device_ptr,
+    const precomputation::ConstantPrecomputation<MODULUS_BITS>
+        &constant_precomp) -> bool {
+  std::vector<uint64_t> input(N_val);
+  for (size_t index = 0; index < N_val; ++index) {
+    input[index] = (index * index * 17 + index * 13 + 5) % modulus.get_modulus();
+  }
+  std::vector<uint64_t> expected_forward(N_val);
+  std::vector<uint64_t> expected_inverse(N_val);
+  NttReference reference(N_val, modulus.get_modulus(), modulus.get_generator());
+  reference.compute_forward(expected_forward.data(), input.data());
+  reference.compute_inverse(expected_inverse.data(), expected_forward.data());
+
+  thrust::device_vector<uint64_t> data(input);
+  std::vector<uint64_t> inverse_powers(N_val / 2);
+  uint64_t power = 1;
+  const uint64_t inverse_root = modulus.get_root_inverse(N_val);
+  for (size_t index = 0; index < inverse_powers.size(); ++index) {
+    inverse_powers[index] = power;
+    power = modulus.multiply(power, inverse_root);
+  }
+  thrust::device_vector<uint64_t> d_inverse_powers(inverse_powers);
+  launch_forward_ntt_fermat(N_val, thrust::raw_pointer_cast(data.data()),
+                            precomp_device_ptr, constant_precomp, nullptr);
+  cudaDeviceSynchronize();
+  thrust::host_vector<uint64_t> forward = data;
+  for (size_t index = 0; index < N_val; ++index) {
+    if (forward[index] % modulus.get_modulus() !=
+        expected_forward[index] % modulus.get_modulus()) {
+      std::cerr << "NTT differential forward mismatch N=" << N_val
+                << " index=" << index << '\n';
+      return false;
+    }
+  }
+  launch_inverse_ntt_fermat(
+      N_val, thrust::raw_pointer_cast(data.data()), modulus.invert(N_val),
+      modulus.get_modulus(), thrust::raw_pointer_cast(d_inverse_powers.data()),
+      nullptr);
+  cudaDeviceSynchronize();
+  thrust::host_vector<uint64_t> inverse = data;
+  for (size_t index = 0; index < N_val; ++index) {
+    if (inverse[index] % modulus.get_modulus() !=
+        expected_inverse[index] % modulus.get_modulus()) {
+      std::cerr << "NTT differential inverse mismatch N=" << N_val
+                << " index=" << index << " expected=" << expected_inverse[index]
+                << " actual=" << inverse[index] % modulus.get_modulus() << '\n';
+      return false;
+    }
+  }
+  std::cout << "NTT differential PASS N=" << N_val << '\n';
+  return true;
+}
+
 // -------------------------------------------------------------------------
 // Main
 // -------------------------------------------------------------------------
@@ -839,6 +936,10 @@ auto main(int argc, char **argv) -> int {
   std::string primes_file_name = "primes.txt";
   std::string sieve_file_name = "";
   bool is_crunch = false;
+  bool ordered_mode = false;
+  bool fermat_regression = false;
+  std::string ordered_bases_file;
+  std::string ordered_candidates_file;
 
   // Default to crunch mode if no arguments are provided
   if (argc == 1) {
@@ -869,9 +970,150 @@ auto main(int argc, char **argv) -> int {
       sieve_file_name = argv[++i];
       is_crunch = true;
     }
+    if (arg == "--ordered") {
+      if (i + 2 >= argc) {
+        std::cerr
+            << "ERROR --ordered requires BASES_FILE and CANDIDATES_FILE\n";
+        return 2;
+      }
+      ordered_mode = true;
+      ordered_bases_file = argv[++i];
+      ordered_candidates_file = argv[++i];
+      is_crunch = true;
+    }
+    if (arg == "--fermat-regression") {
+      fermat_regression = true;
+    }
+  }
+
+  if (fermat_regression) {
+    if (!run_ntt_differential(4096, modulus,
+                              thrust::raw_pointer_cast(precomp_device.get()),
+                              constant_precomp) ||
+        !run_ntt_differential(65536, modulus,
+                              thrust::raw_pointer_cast(precomp_device.get()),
+                              constant_precomp)) {
+      return 1;
+    }
+    const std::vector<uint64_t> candidates = {3, 17, 65537, 41559263,
+                                               9, 15, 21, 25};
+    for (const uint64_t candidate_value : candidates) {
+      mpz_set_ui(p, candidate_value);
+      mpz_t oracle;
+      mpz_t fermat_base;
+      mpz_init(oracle);
+      mpz_init_set_ui(fermat_base, 2);
+      mpz_powm_ui(oracle, fermat_base, candidate_value - 1, p);
+      // The GPU pipeline implements this Fermat congruence, not a primality
+      // test.  Keep the GMP oracle at the same level so its return-value
+      // convention cannot affect this regression.
+      const bool expected_fermat = mpz_cmp_ui(oracle, 1) == 0;
+      mpz_clear(oracle);
+      mpz_clear(fermat_base);
+      const size_t bit_len = mpz_sizeinbase(p, 2);
+      const size_t d = (bit_len + 15) / 16;
+      StreamContext context;
+      {
+        std::lock_guard<std::mutex> lock(get_state_mutex());
+        get_global_thread_states()[0].cand_start = std::chrono::steady_clock::now();
+        get_global_thread_states()[0].is_running = true;
+      }
+      const bool actual = run_fermat_pipeline(
+          p, bit_len, d, 4096, modulus.invert(4096), modulus,
+          thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
+          context, {}, {}, 0, candidate_value);
+      if (actual != expected_fermat) {
+        std::cerr << "GPU Fermat mismatch p=" << candidate_value
+                  << " expected=" << expected_fermat
+                  << " actual=" << actual << '\n';
+        mpz_clear(p);
+        return 1;
+      }
+      std::cout << "GPU Fermat PASS p=" << candidate_value
+                << " expected=" << expected_fermat
+                << " actual=" << actual << '\n';
+    }
+    mpz_clear(p);
+    return 0;
   }
 
   if (is_crunch) {
+    if (ordered_mode) {
+      std::vector<std::string> base_strings;
+      std::vector<std::string> candidate_strings;
+      if (!read_ordered_lines(ordered_bases_file, base_strings, "base") ||
+          !read_ordered_lines(ordered_candidates_file, candidate_strings,
+                              "candidate", true) ||
+          base_strings.size() != 3) {
+        std::cerr << "ERROR ordered mode requires exactly three base primes\n";
+        return 2;
+      }
+      mpz_t K;
+      mpz_init_set_ui(K, 2);
+      for (const std::string &base_string : base_strings) {
+        mpz_t base;
+        mpz_init(base);
+        if (mpz_set_str(base, base_string.c_str(), 10) != 0 ||
+            mpz_cmp_ui(base, 1) <= 0) {
+          std::cerr << "ERROR invalid base prime\n";
+          mpz_clear(base);
+          mpz_clear(K);
+          return 2;
+        }
+        mpz_mul(K, K, base);
+        mpz_clear(base);
+      }
+      std::cout << "PLAN candidates=" << candidate_strings.size() << '\n';
+      for (size_t index = 0; index < candidate_strings.size(); ++index) {
+        const std::string &q_string = candidate_strings[index];
+        if (q_string.size() > 20) {
+          std::cerr << "ERROR candidate q exceeds uint64\n";
+          mpz_clear(K);
+          return 2;
+        }
+        uint64_t q = 0;
+        try {
+          q = std::stoull(q_string);
+        } catch (const std::exception &) {
+          std::cerr << "ERROR invalid candidate q\n";
+          mpz_clear(K);
+          return 2;
+        }
+        if (q < 2) {
+          std::cerr << "ERROR invalid candidate q\n";
+          mpz_clear(K);
+          return 2;
+        }
+        std::cout << "TEST index=" << index << " q=" << q << '\n';
+        Candidate candidate;
+        candidate.q_val = q;
+        mpz_mul_ui(candidate.p, K, q);
+        mpz_add_ui(candidate.p, candidate.p, 1);
+        candidate.bit_len = mpz_sizeinbase(candidate.p, 2);
+        candidate.d = (candidate.bit_len + 15) / 16;
+        candidate.N_val = candidate.bit_len <= 32000 ? 4096 : 65536;
+        if (2 * candidate.d + 2 > candidate.N_val) {
+          std::cerr << "ERROR candidate exceeds supported transform size\n";
+          mpz_clear(K);
+          return 2;
+        }
+        uint64_t inv_n = modulus.invert(candidate.N_val);
+        StreamContext context;
+        bool passed = run_fermat_pipeline(
+            candidate.p, candidate.bit_len, candidate.d, candidate.N_val, inv_n,
+            modulus, thrust::raw_pointer_cast(precomp_device.get()),
+            constant_precomp, context, candidate.h_P, candidate.h_mu, 0, q);
+        if (passed) {
+          char *p_string = mpz_get_str(nullptr, 10, candidate.p);
+          std::cout << "FOUND index=" << index << " q=" << q
+                    << " p=" << p_string << '\n';
+          free(p_string);
+        }
+      }
+      mpz_clear(K);
+      std::cout << "DONE\n";
+      return 0;
+    }
     std::cout << "--- Crunch Mode ---" << '\n';
     std::vector<std::string> p_strs;
     std::ifstream pf(primes_file_name);
@@ -907,7 +1149,7 @@ auto main(int argc, char **argv) -> int {
       sieve_primes.push_back(std::stoull(line));
     }
     std::cout << "Loaded " << sieve_primes.size() << " sieve primes." << '\n';
-    
+
     std::random_device rd;
     std::mt19937_64 shuffle_rng(rd());
     std::shuffle(sieve_primes.begin(), sieve_primes.end(), shuffle_rng);
@@ -921,12 +1163,12 @@ auto main(int argc, char **argv) -> int {
       while (true) {
         Candidate cand = prepare_next_candidate(K, sieve_primes);
         if (cand.q_val == 0) {
-            break; // No more candidates!
+          break; // No more candidates!
         }
 
         {
           std::lock_guard<std::mutex> lock(get_state_mutex());
-          auto& states = get_global_thread_states();
+          auto &states = get_global_thread_states();
           states[thread_id].q_val = cand.q_val;
           states[thread_id].pct = 0;
           states[thread_id].cand_start = std::chrono::steady_clock::now();

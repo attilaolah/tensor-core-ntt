@@ -1,5 +1,9 @@
 #include <atomic>
+#include <cstdio>
 #include <iomanip>
+#include <iostream>
+#include <mutex>
+#include <string>
 // test-fermat.cu
 #include <cuda_runtime.h>
 #include <gmp.h>
@@ -15,36 +19,55 @@ inline auto get_program_start() {
   return start;
 }
 
-struct ThreadState {
-  uint64_t q_val = 0;
-  int pct = 0;
-  std::chrono::steady_clock::time_point cand_start;
-  bool is_running = false;
-};
-
-inline std::vector<ThreadState> &get_global_thread_states() {
-  static std::vector<ThreadState> states(4);
-  return states;
-}
-
-inline std::mutex &get_state_mutex() {
-  static std::mutex state_mutex;
-  return state_mutex;
-}
-
 inline std::mutex &get_print_mutex() {
   static std::mutex print_mutex;
   return print_mutex;
+}
+
+auto format_duration(std::chrono::seconds duration) -> std::string {
+  const auto seconds = duration.count();
+  char buffer[32];
+  snprintf(buffer, sizeof(buffer), "%02lld:%02lld",
+           static_cast<long long>(seconds / 60),
+           static_cast<long long>(seconds % 60));
+  return buffer;
+}
+
+void print_candidate_status(int thread_id, std::chrono::steady_clock::time_point
+                                               candidate_start,
+                            uint64_t q_val, size_t completed, size_t total,
+                            const std::string &result) {
+  const auto now = std::chrono::steady_clock::now();
+  const auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
+      now - get_program_start());
+  const auto candidate_duration =
+      std::chrono::duration_cast<std::chrono::seconds>(now - candidate_start);
+  const double completion = total == 0
+                                ? 0.0
+                                : 100.0 * static_cast<double>(completed) /
+                                      static_cast<double>(total);
+
+  std::lock_guard<std::mutex> lock(get_print_mutex());
+  std::cout << "[T" << std::setfill('0') << std::setw(2) << thread_id
+            << std::setfill(' ') << " | " << format_duration(uptime) << " | F "
+            << format_duration(candidate_duration) << "] [C " << std::setw(5)
+            << static_cast<unsigned long long>(completed) << " | N "
+            << std::setw(5) << static_cast<unsigned long long>(total) << " | "
+            << std::fixed << std::setprecision(2) << std::setw(6) << completion
+            << "%] [Q " << std::setw(11) << q_val << "] " << result << '\n'
+            << std::defaultfloat;
+}
+
+inline std::atomic<size_t> &get_completed_candidate_count() {
+  static std::atomic<size_t> count{0};
+  return count;
 }
 
 #include <cstdint>
 #include <deque>
 #include <fstream>
 #include <future>
-#include <iostream>
-#include <mutex>
 #include <random>
-#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -461,7 +484,8 @@ auto run_fermat_pipeline(
     StreamContext &ctx,
     const std::vector<uint64_t> &h_P_in = std::vector<uint64_t>(),
     const std::vector<uint64_t> &h_mu_in = std::vector<uint64_t>(),
-    int thread_id = 0, uint64_t q_val = 0) -> bool {
+    int thread_id = 0, uint64_t q_val = 0, size_t candidate_total = 0) -> bool {
+  const auto candidate_start = std::chrono::steady_clock::now();
   (void)bit_len;
   std::vector<uint64_t> h_P = h_P_in;
   std::vector<uint64_t> h_mu = h_mu_in;
@@ -642,39 +666,10 @@ auto run_fermat_pipeline(
       int pct = (squarings * 100) / total_steps;
 
       if (pct < 100) {
-        std::lock_guard<std::mutex> lock(get_state_mutex());
-        auto &states = get_global_thread_states();
-        if ((size_t)thread_id < states.size()) {
-          states[thread_id].pct = pct;
-        }
-
-        auto now = std::chrono::steady_clock::now();
-        auto uptime_sec = std::chrono::duration_cast<std::chrono::seconds>(
-                              now - get_program_start())
-                              .count();
-        int u_h = uptime_sec / 3600;
-        int u_m = (uptime_sec % 3600) / 60;
-        int u_s = uptime_sec % 60;
-
-        char uptime_buf[64];
-        snprintf(uptime_buf, sizeof(uptime_buf), "\r[%02d:%02d:%02d]", u_h, u_m,
-                 u_s);
-        std::cout << uptime_buf;
-
-        for (size_t t = 0; t < states.size(); t++) {
-          if (states[t].is_running) {
-            auto cand_sec = std::chrono::duration_cast<std::chrono::seconds>(
-                                now - states[t].cand_start)
-                                .count();
-            int c_m = cand_sec / 60;
-            int c_s = cand_sec % 60;
-            char cand_buf[64];
-            snprintf(cand_buf, sizeof(cand_buf), " [%lu %02d:%02d %02d%%]",
-                     states[t].q_val, c_m, c_s, states[t].pct);
-            std::cout << cand_buf;
-          }
-        }
-        std::cout << "          " << std::flush;
+        print_candidate_status(thread_id, candidate_start, q_val,
+                               get_completed_candidate_count().load(),
+                               candidate_total,
+                               "running " + std::to_string(pct) + "%");
       }
     }
   }
@@ -701,34 +696,9 @@ auto run_fermat_pipeline(
   } else {
     result_msg = "x != 1 (" + std::to_string(mpz_get_ui(final_val)) + ")";
   }
-  {
-    std::lock_guard<std::mutex> lock(get_state_mutex());
-    auto &states = get_global_thread_states();
-    if ((size_t)thread_id < states.size()) {
-      states[thread_id].is_running = false;
-    }
-    std::cout << "\r                                                           "
-                 "                                                             "
-                 "          \r";
-    auto now = std::chrono::steady_clock::now();
-    auto uptime_sec = std::chrono::duration_cast<std::chrono::seconds>(
-                          now - get_program_start())
-                          .count();
-    auto cand_sec = std::chrono::duration_cast<std::chrono::seconds>(
-                        now - states[thread_id].cand_start)
-                        .count();
-    int u_h = uptime_sec / 3600;
-    int u_m = (uptime_sec % 3600) / 60;
-    int u_s = uptime_sec % 60;
-    int c_m = cand_sec / 60;
-    int c_s = cand_sec % 60;
-    char time_buf[64];
-    snprintf(time_buf, sizeof(time_buf), "[%02d:%02d:%02d %02d:%02d] ", u_h,
-             u_m, u_s, c_m, c_s);
-    std::cout << time_buf << "Q " << q_val << " (" << mpz_sizeinbase(p, 2)
-              << " bits) | SQ " << total_steps << " | 100% | " << result_msg
-              << "\n";
-  }
+  const size_t completed = get_completed_candidate_count().fetch_add(1) + 1;
+  print_candidate_status(thread_id, candidate_start, q_val, completed,
+                         candidate_total, result_msg);
   mpz_clear(final_val);
   mpz_clear(p_minus_1);
   mpz_clear(mu);
@@ -1013,15 +983,10 @@ auto main(int argc, char **argv) -> int {
       const size_t bit_len = mpz_sizeinbase(p, 2);
       const size_t d = (bit_len + 15) / 16;
       StreamContext context;
-      {
-        std::lock_guard<std::mutex> lock(get_state_mutex());
-        get_global_thread_states()[0].cand_start = std::chrono::steady_clock::now();
-        get_global_thread_states()[0].is_running = true;
-      }
       const bool actual = run_fermat_pipeline(
           p, bit_len, d, 4096, modulus.invert(4096), modulus,
           thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
-          context, {}, {}, 0, candidate_value);
+          context, {}, {}, 0, candidate_value, candidates.size());
       if (actual != expected_fermat) {
         std::cerr << "GPU Fermat mismatch p=" << candidate_value
                   << " expected=" << expected_fermat
@@ -1102,7 +1067,8 @@ auto main(int argc, char **argv) -> int {
         bool passed = run_fermat_pipeline(
             candidate.p, candidate.bit_len, candidate.d, candidate.N_val, inv_n,
             modulus, thrust::raw_pointer_cast(precomp_device.get()),
-            constant_precomp, context, candidate.h_P, candidate.h_mu, 0, q);
+            constant_precomp, context, candidate.h_P, candidate.h_mu, 0, q,
+            candidate_strings.size());
         if (passed) {
           char *p_string = mpz_get_str(nullptr, 10, candidate.p);
           std::cout << "FOUND index=" << index << " q=" << q
@@ -1166,20 +1132,12 @@ auto main(int argc, char **argv) -> int {
           break; // No more candidates!
         }
 
-        {
-          std::lock_guard<std::mutex> lock(get_state_mutex());
-          auto &states = get_global_thread_states();
-          states[thread_id].q_val = cand.q_val;
-          states[thread_id].pct = 0;
-          states[thread_id].cand_start = std::chrono::steady_clock::now();
-          states[thread_id].is_running = true;
-        }
-
         uint64_t inv_n = modulus.invert(cand.N_val);
         bool passed = run_fermat_pipeline(
             cand.p, cand.bit_len, cand.d, cand.N_val, inv_n, modulus,
             thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
-            stream_ctxs[thread_id], cand.h_P, cand.h_mu, thread_id, cand.q_val);
+            stream_ctxs[thread_id], cand.h_P, cand.h_mu, thread_id, cand.q_val,
+            sieve_primes.size());
 
         if (passed) {
           std::lock_guard<std::mutex> flock(file_mutex);
@@ -1280,6 +1238,6 @@ auto main(int argc, char **argv) -> int {
     std::vector<uint64_t> empty_vec;
     run_fermat_pipeline(p, bit_len, d, N_val, inv_n, modulus,
                         thrust::raw_pointer_cast(precomp_device.get()),
-                        constant_precomp, ctx, empty_vec, empty_vec, 0, 0);
+                        constant_precomp, ctx, empty_vec, empty_vec, 0, 0, 1);
   }
 }

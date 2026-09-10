@@ -7,19 +7,89 @@ CPU before repository state is changed.
 """
 import argparse
 import hashlib
+import importlib
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import threading
+from types import ModuleType
 
 sys.set_int_max_str_digits(0)
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent))
-from candidate_plan import MASK64, candidate_plan, plan_hash, read_plan, write_plan
+MASK64 = (1 << 64) - 1
+candidate_plans: ModuleType | None = None
 DATA_DIR = ROOT.parent / "data"
 TIP_FILE = ROOT.parent / "TIP"
+
+
+def candidate_plan(*args, **kwargs):
+    """Compatibility proxy for planner-only users of this module."""
+    return importlib.import_module("candidate_plan").candidate_plan(*args, **kwargs)
+
+
+def plan_hash(*args, **kwargs):
+    return importlib.import_module("candidate_plan").plan_hash(*args, **kwargs)
+
+
+def read_plan(*args, **kwargs):
+    return importlib.import_module("candidate_plan").read_plan(*args, **kwargs)
+
+
+def write_plan(*args, **kwargs):
+    return importlib.import_module("candidate_plan").write_plan(*args, **kwargs)
+
+
+def _native_candidate_filter_path():
+    """Return the configured helper, building the Nix output when necessary."""
+    configured = os.environ.get("PRIMES_CANDIDATE_FILTER_LIB")
+    if configured:
+        library = Path(configured)
+        if not library.is_file():
+            raise OSError(f"PRIMES_CANDIDATE_FILTER_LIB does not name a shared library: {library}")
+        return library
+    try:
+        output = subprocess.check_output(
+            ["nix", "build", "--print-out-paths", ".#candidate-filter"],
+            cwd=ROOT.parent, text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise OSError(
+            "could not build Nix candidate-filter; install/configure Nix or set "
+            "PRIMES_CANDIDATE_FILTER_LIB to libcandidate_filter"
+        ) from error
+    library_dir = Path(output) / "lib"
+    library = next(
+        (library_dir / f"libcandidate_filter{suffix}"
+         for suffix in (".so", ".dylib", ".dll")
+         if (library_dir / f"libcandidate_filter{suffix}").is_file()),
+        None,
+    )
+    if library is None:
+        raise OSError(f"Nix candidate-filter output has no shared library: {library_dir}")
+    return library
+
+
+def setup_candidate_filter():
+    """Load the mandatory production filter before importing candidate_plan.
+
+    Keeping this lazy lets protocol-only consumers import this module without a
+    Nix build, while ``run`` invokes it before every plan read or generation.
+    """
+    global candidate_plans
+    if candidate_plans is not None:
+        return os.environ["PRIMES_CANDIDATE_FILTER_LIB"]
+    library = _native_candidate_filter_path()
+    os.environ["PRIMES_CANDIDATE_FILTER_LIB"] = str(library)
+    # A planner-only caller may have imported candidate_plan before this GPU
+    # run.  Reload so its import-time backend selection observes the native
+    # library we configured above.
+    candidate_plans = importlib.reload(importlib.import_module("candidate_plan"))
+    if candidate_plans._CANDIDATE_FILTER is None:
+        raise OSError(f"could not load native candidate filter: {library}")
+    return str(library)
 
 
 def selected_primes(data_dir=DATA_DIR, max_digits=None):
@@ -210,8 +280,9 @@ def _stream_stdout(source, destination, captured, validator, failed, process):
             for byte in chunk:
                 if passthrough:
                     destination.write(bytes((byte,)))
-                    if byte == ord("\n"):
+                    if byte in (ord("\r"), ord("\n")):
                         destination.flush()
+                    if byte == ord("\n"):
                         passthrough = False
                     continue
                 pending.append(byte)
@@ -221,6 +292,8 @@ def _stream_stdout(source, destination, captured, validator, failed, process):
                     pending.clear()
                 elif not any(prefix.startswith(pending) or pending.startswith(prefix) for prefix in prefixes):
                     destination.write(pending)
+                    if ord("\r") in pending:
+                        destination.flush()
                     pending.clear()
                     passthrough = True
             destination.flush()
@@ -262,21 +335,25 @@ def run_streamed(command, bases=None, candidates=None, on_found=None):
 
 
 def run(args):
+    library = setup_candidate_filter()
+    assert candidate_plans is not None
+    plans = candidate_plans
+    print(f"[*] Candidate filter backend: native ({library})", flush=True)
     selected = selected_primes(max_digits=args.max_digits)
     if len(selected) != 3:
         raise ValueError("not enough eligible data certificates")
     digest = None
     if args.candidate_plan:
-        plan = read_plan(Path(args.candidate_plan))
+        plan = plans.read_plan(Path(args.candidate_plan))
         if plan["max_digits"] != args.max_digits or plan["sieve_limit"] != args.sieve_limit or plan["seed"] != args.seed or tuple(selected) != plan["bases"]:
             raise ValueError("candidate plan metadata or bases do not match requested search")
         bases, candidates, digest = plan["bases"], plan["candidates"], plan["hash"]
     else:
         bases = selected
-        candidates = candidate_plan(bases, args.sieve_limit, args.seed)
-    digest = digest or plan_hash(bases, args.sieve_limit, args.seed, args.max_digits, candidates)
+        candidates = plans.candidate_plan(bases, args.sieve_limit, args.seed)
+    digest = digest or plans.plan_hash(bases, args.sieve_limit, args.seed, args.max_digits, candidates)
     if args.write_candidate_plan:
-        digest = write_plan(Path(args.write_candidate_plan), bases, args.sieve_limit, args.seed, args.max_digits, candidates)
+        digest = plans.write_plan(Path(args.write_candidate_plan), bases, args.sieve_limit, args.seed, args.max_digits, candidates)
     print("[*] GPU Dynamic Fermat Search Orchestrator Started")
     print(f"[+] Found Base Primes: {len(str(bases[0]))} digits, {len(str(bases[1]))} digits, {len(str(bases[2]))} digits")
     print(f"[*] Built Sieve of Eratosthenes up to {args.sieve_limit}; {len(candidates)} candidates survive")

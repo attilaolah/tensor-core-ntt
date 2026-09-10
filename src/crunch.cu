@@ -699,7 +699,7 @@ auto run_fermat_pipeline(
     is_prime = true;
     result_msg = "*** FOUND PROBABLE PRIME! ***";
   } else {
-    result_msg = "x != 1";
+    result_msg = "x != 1 (" + std::to_string(mpz_get_ui(final_val)) + ")";
   }
   {
     std::lock_guard<std::mutex> lock(get_state_mutex());

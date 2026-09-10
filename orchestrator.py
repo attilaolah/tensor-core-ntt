@@ -58,23 +58,54 @@ def witness(prime, factors):
     return None
 
 
-def certify_prime(prime, data_dir=DATA_DIR):
+def certificate_documents(prime):
+    """Build Pratt certificates in memory, so failed proofs leave no files."""
     if prime == 2:
-        certificate_path(2, data_dir).write_text("V 1\nP 2\n", encoding="ascii")
-        return
+        return {2: "V 1\nP 2\n"}
     factors = factor_distinct(prime - 1)
     proof = witness(prime, factors)
     if proof is None:
         raise ValueError("CPU Pratt verification failed")
+    documents = {}
     for factor in factors:
-        certify_prime(factor, data_dir)
+        documents.update(certificate_documents(factor))
     counts = []
     for factor in factors:
         power, remaining = 0, prime - 1
         while remaining % factor == 0:
             power, remaining = power + 1, remaining // factor
         counts.append(f"F {factor}" + (f"^{power}" if power > 1 else ""))
-    certificate_path(prime, data_dir).write_text("\n".join(["V 1", f"P {prime}", f"W {proof}", *counts]) + "\n", encoding="ascii")
+    documents[prime] = "\n".join(["V 1", f"P {prime}", f"W {proof}", *counts]) + "\n"
+    return documents
+
+
+def certify_prime(prime, data_dir=DATA_DIR):
+    for value, document in certificate_documents(prime).items():
+        certificate_path(value, data_dir).write_text(document, encoding="ascii")
+
+
+def certify_gpu_found(q, prime, bases, data_dir=DATA_DIR, tip_file=TIP_FILE):
+    """Certify a GPU hit from its supplied, complete p - 1 factorization."""
+    factors = [2, *bases, q]
+    if len(bases) != 3 or prime - 1 != 2 * bases[0] * bases[1] * bases[2] * q:
+        raise ValueError("GPU FOUND has incorrect known p - 1 factorization")
+    if pow(2, prime - 1, prime) != 1:
+        raise ValueError("GPU Fermat claim failed CPU verification")
+    distinct = sorted(set(factors))
+    proof = witness(prime, distinct)
+    if proof is None:
+        raise ValueError("CPU Pratt verification failed for GPU hit")
+
+    # q is the sole unknown factor; never generically factor prime - 1.
+    documents = certificate_documents(q)
+    counts = []
+    for factor in distinct:
+        power = factors.count(factor)
+        counts.append(f"F {factor}" + (f"^{power}" if power > 1 else ""))
+    documents[prime] = "\n".join(["V 1", f"P {prime}", f"W {proof}", *counts]) + "\n"
+    for value, document in documents.items():
+        certificate_path(value, data_dir).write_text(document, encoding="ascii")
+    tip_file.write_text(certificate_path(prime, data_dir).name + "\n", encoding="ascii")
 
 
 def validate_protocol(output, bases, candidates):
@@ -178,9 +209,7 @@ def run(args):
         raise RuntimeError(f"GPU program failed ({returncode}): {stderr.strip()}")
     hits = validate_protocol(stdout, bases, candidates)
     for q, prime in hits:
-        # This independently proves primality (including q) before any TIP update.
-        certify_prime(prime)
-        TIP_FILE.write_text(certificate_path(prime).name + "\n", encoding="ascii")
+        certify_gpu_found(q, prime, bases)
         print(f"[+] CPU-certified GPU hit q={q}; updated TIP")
 
 

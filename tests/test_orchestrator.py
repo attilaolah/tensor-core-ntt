@@ -69,6 +69,36 @@ class OrchestratorTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 read_plan(path)
 
+    def test_gpu_found_writes_canonical_certificate_without_factoring_p_minus_one(self):
+        # p = 2 * 3 * 5 * 7 * 11 + 1 = 2311.  The test rejects accidental use
+        # of the generic p certificate path, which would factor p - 1.
+        bases, q = [3, 5, 7], 11
+        prime = 2 * 3 * 5 * 7 * q + 1
+        with tempfile.TemporaryDirectory() as directory:
+            data, tip = Path(directory) / "data", Path(directory) / "TIP"
+            data.mkdir()
+            original_factor_distinct = orch.factor_distinct
+            with mock.patch.object(
+                orch,
+                "factor_distinct",
+                side_effect=lambda value: self.fail("factored p - 1") if value == prime - 1 else original_factor_distinct(value),
+            ):
+                orch.certify_gpu_found(q, prime, bases, data, tip)
+            self.assertEqual(
+                orch.certificate_path(prime, data).read_text(encoding="ascii"),
+                "V 1\nP 2311\nW 3\nF 2\nF 3\nF 5\nF 7\nF 11\n",
+            )
+            self.assertEqual(tip.read_text(encoding="ascii"), orch.certificate_path(prime, data).name + "\n")
+
+    def test_invalid_gpu_found_does_not_write_data_or_tip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data, tip = Path(directory) / "data", Path(directory) / "TIP"
+            data.mkdir()
+            with self.assertRaises(ValueError):
+                orch.certify_gpu_found(11, 2312, [3, 5, 7], data, tip)
+            self.assertEqual(list(data.iterdir()), [])
+            self.assertFalse(tip.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

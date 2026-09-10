@@ -37,6 +37,8 @@
             gmp
           ];
 
+          nativeBuildInputs = [pkgs.makeWrapper];
+
           buildPhase = ''
             ${exports}
 
@@ -46,6 +48,11 @@
           installPhase = ''
             mkdir -p $out/bin
             cp crunch_sm_86 $out/bin/
+          '';
+
+          postFixup = ''
+            wrapProgram $out/bin/crunch_sm_86 \
+              --prefix LD_LIBRARY_PATH : /run/opengl-driver/lib:${pkgs.cudaPackages.cudatoolkit}/lib
           '';
 
           meta = with pkgs.lib; {

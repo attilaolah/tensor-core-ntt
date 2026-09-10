@@ -1063,7 +1063,7 @@ auto main(int argc, char **argv) -> int {
         mpz_mul(K, K, base);
         mpz_clear(base);
       }
-      std::cout << "PLAN candidates=" << candidate_strings.size() << '\n';
+      std::cout << "PLAN count=" << candidate_strings.size() << '\n';
       for (size_t index = 0; index < candidate_strings.size(); ++index) {
         const std::string &q_string = candidate_strings[index];
         if (q_string.size() > 20) {

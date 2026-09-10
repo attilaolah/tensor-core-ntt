@@ -12,11 +12,12 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 
 sys.set_int_max_str_digits(0)
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent))
-from candidate_plan import MASK64, candidate_plan, read_plan, write_plan
+from candidate_plan import MASK64, candidate_plan, plan_hash, read_plan, write_plan
 DATA_DIR = ROOT.parent / "data"
 TIP_FILE = ROOT.parent / "TIP"
 
@@ -77,9 +78,14 @@ def certify_prime(prime, data_dir=DATA_DIR):
 
 
 def validate_protocol(output, bases, candidates):
-    hits, done, tested = [], False, []
+    hits, done, tested, planned = [], False, [], False
     for line in output.splitlines():
-        if line == "DONE":
+        if line.startswith("PLAN "):
+            fields = dict(field.split("=", 1) for field in line.split()[1:] if "=" in field)
+            if fields != {"count": str(len(candidates))} or planned:
+                raise ValueError("PLAN does not match ordered candidate plan")
+            planned = True
+        elif line == "DONE":
             done = True
         elif line.startswith("TEST "):
             fields = dict(field.split("=", 1) for field in line.split()[1:] if "=" in field)
@@ -99,11 +105,41 @@ def validate_protocol(output, bases, candidates):
             if prime != 2 * bases[0] * bases[1] * bases[2] * q + 1:
                 raise ValueError("FOUND has incorrect constructed p")
             hits.append((q, prime))
+    if not planned:
+        raise ValueError("GPU did not emit PLAN")
     if not done:
         raise ValueError("GPU did not emit DONE")
     if tested != candidates:
         raise ValueError("GPU did not test the complete ordered candidate plan")
     return hits
+
+
+def _tee_stream(source, destination, captured):
+    """Forward raw child bytes immediately while retaining them for validation."""
+    reader = getattr(source, "read1", source.read)
+    while chunk := reader(64 * 1024):
+        captured.extend(chunk)
+        destination.write(chunk)
+        destination.flush()
+
+
+def run_streamed(command):
+    """Run a child with live, byte-for-byte output and collected protocol text."""
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert process.stdout is not None and process.stderr is not None
+    stdout, stderr = bytearray(), bytearray()
+    stdout_sink = getattr(sys.stdout, "buffer", sys.stdout)
+    stderr_sink = getattr(sys.stderr, "buffer", sys.stderr)
+    threads = [
+        threading.Thread(target=_tee_stream, args=(process.stdout, stdout_sink, stdout)),
+        threading.Thread(target=_tee_stream, args=(process.stderr, stderr_sink, stderr)),
+    ]
+    for thread in threads:
+        thread.start()
+    returncode = process.wait()
+    for thread in threads:
+        thread.join()
+    return returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
 
 
 def run(args):
@@ -119,15 +155,16 @@ def run(args):
     else:
         bases = selected
         candidates = candidate_plan(bases, args.sieve_limit, args.seed)
+    digest = digest or plan_hash(bases, args.sieve_limit, args.seed, args.max_digits, candidates)
     if args.write_candidate_plan:
         digest = write_plan(Path(args.write_candidate_plan), bases, args.sieve_limit, args.seed, args.max_digits, candidates)
     print("[*] GPU Dynamic Fermat Search Orchestrator Started")
     print(f"[+] Found Base Primes: {len(str(bases[0]))} digits, {len(str(bases[1]))} digits, {len(str(bases[2]))} digits")
     print(f"[*] Built Sieve of Eratosthenes up to {args.sieve_limit}; {len(candidates)} candidates survive")
-    print(f"[*] Seed: {args.seed}; plan hash: {digest or 'ephemeral'}")
+    print(f"[*] Seed: {args.seed}; plan hash: {digest}; candidate count: {len(candidates)}", flush=True)
     if args.write_candidate_plan:
         print(f"[*] Wrote candidate plan: {args.write_candidate_plan}")
-    print("[*] Starting ordered GPU Fermat search...")
+    print("[*] Starting ordered GPU Fermat search...", flush=True)
     binary = Path(args.gpu_binary) if args.gpu_binary else ROOT / "result/bin/crunch_sm_86"
     if not args.gpu_binary:
         subprocess.run(["nix", "build"], cwd=ROOT, check=True)
@@ -136,10 +173,10 @@ def run(args):
         base_file, candidate_file = directory / "bases", directory / "candidates"
         base_file.write_text("\n".join(map(str, bases)) + "\n", encoding="ascii")
         candidate_file.write_text("\n".join(map(str, candidates)) + ("\n" if candidates else ""), encoding="ascii")
-        result = subprocess.run([str(binary), "--ordered", str(base_file), str(candidate_file)], text=True, capture_output=True)
-    if result.returncode:
-        raise RuntimeError(f"GPU program failed ({result.returncode}): {result.stderr.strip()}")
-    hits = validate_protocol(result.stdout, bases, candidates)
+        returncode, stdout, stderr = run_streamed([str(binary), "--ordered", str(base_file), str(candidate_file)])
+    if returncode:
+        raise RuntimeError(f"GPU program failed ({returncode}): {stderr.strip()}")
+    hits = validate_protocol(stdout, bases, candidates)
     for q, prime in hits:
         # This independently proves primality (including q) before any TIP update.
         certify_prime(prime)

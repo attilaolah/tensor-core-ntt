@@ -51,6 +51,54 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), output.encode())
         self.assertEqual(orch.validate_protocol(protocol, [3, 5, 7], [11]), [])
 
+    def test_streamed_found_is_hidden_certified_before_child_done_and_validated(self):
+        bases, q = [3, 5, 7], 11
+        prime = 2 * 3 * 5 * 7 * q + 1
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            data, tip, marker = directory / "data", directory / "TIP", directory / "certified"
+            data.mkdir()
+            script = (
+                "import os, sys, time; "
+                "print('PLAN count=1'); print('CUDA 10%\\r'); "
+                f"print('TEST index=0 q={q}'); print('FOUND index=0 q={q} p={prime}', flush=True); "
+                f"time.sleep(.2); print('CUDA certified=' + str(os.path.exists({str(marker)!r}))); print('DONE')"
+            )
+            visible = io.BytesIO()
+
+            def certify(found_q, found_prime):
+                orch.certify_gpu_found(found_q, found_prime, bases, data, tip)
+                marker.write_text("yes", encoding="ascii")
+
+            with mock.patch.object(orch.sys, "stdout", mock.Mock(buffer=visible)):
+                returncode, protocol, _ = orch.run_streamed(
+                    [sys.executable, "-c", script], bases, [q], certify
+                )
+            self.assertEqual(returncode, 0)
+            self.assertIn("FOUND index=0", protocol)
+            self.assertNotIn(b"PLAN", visible.getvalue())
+            self.assertNotIn(b"TEST", visible.getvalue())
+            self.assertNotIn(b"FOUND", visible.getvalue())
+            self.assertIn(b"CUDA certified=True", visible.getvalue())
+            self.assertEqual(tip.read_text(encoding="ascii"), orch.certificate_path(prime, data).name + "\n")
+
+    def test_malformed_streamed_found_stops_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data, tip = Path(directory) / "data", Path(directory) / "TIP"
+            data.mkdir()
+            output = "PLAN count=1\nTEST index=0 q=11\nFOUND index=0 q=11 p=1\n"
+            with mock.patch.object(orch.sys, "stdout", mock.Mock(buffer=io.BytesIO())):
+                with self.assertRaisesRegex(ValueError, "constructed p"):
+                    orch.run_streamed([sys.executable, "-c", f"import sys, time; print({output!r}, end='', flush=True); time.sleep(5)"], [3, 5, 7], [11], lambda q, p: orch.certify_gpu_found(q, p, [3, 5, 7], data, tip))
+            self.assertEqual(list(data.iterdir()), [])
+            self.assertFalse(tip.exists())
+
+    def test_streamed_protocol_requires_complete_tests_and_done(self):
+        for output in ("PLAN count=1\nTEST index=0 q=11\n", "PLAN count=1\nDONE\n"):
+            with self.subTest(output=output), mock.patch.object(orch.sys, "stdout", mock.Mock(buffer=io.BytesIO())):
+                with self.assertRaises(ValueError):
+                    orch.run_streamed([sys.executable, "-c", f"import sys; print({output!r}, end='')"], [3, 5, 7], [11])
+
     def test_persisted_plan_rejects_tampering(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "plan"

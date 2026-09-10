@@ -108,41 +108,87 @@ def certify_gpu_found(q, prime, bases, data_dir=DATA_DIR, tip_file=TIP_FILE):
     tip_file.write_text(certificate_path(prime, data_dir).name + "\n", encoding="ascii")
 
 
-def validate_protocol(output, bases, candidates):
-    hits, done, tested, planned = [], False, [], False
-    for line in output.splitlines():
+class ProtocolValidator:
+    """Validate ordered GPU records, invoking ``on_found`` before more work runs."""
+
+    def __init__(self, bases, candidates, on_found=None):
+        self.bases, self.candidates, self.on_found = bases, candidates, on_found
+        self.hits, self.done, self.tested, self.planned = [], False, [], False
+        self.certified = set()
+
+    @staticmethod
+    def _fields(line, record):
+        parts = line.split()
+        if not parts or parts[0] != record:
+            raise ValueError(f"malformed {record} record")
+        fields = {}
+        for part in parts[1:]:
+            if part.count("=") != 1:
+                raise ValueError(f"malformed {record} record")
+            key, value = part.split("=", 1)
+            if not key or not value or key in fields:
+                raise ValueError(f"malformed {record} record")
+            fields[key] = value
+        return fields
+
+    def process(self, line):
+        if self.done:
+            raise ValueError("GPU emitted a record after DONE")
         if line.startswith("PLAN "):
-            fields = dict(field.split("=", 1) for field in line.split()[1:] if "=" in field)
-            if fields != {"count": str(len(candidates))} or planned:
+            fields = self._fields(line, "PLAN")
+            if fields != {"count": str(len(self.candidates))} or self.planned or self.tested:
                 raise ValueError("PLAN does not match ordered candidate plan")
-            planned = True
+            self.planned = True
         elif line == "DONE":
-            done = True
+            if not self.planned or self.tested != self.candidates:
+                raise ValueError("GPU emitted DONE before the complete ordered candidate plan")
+            self.done = True
         elif line.startswith("TEST "):
-            fields = dict(field.split("=", 1) for field in line.split()[1:] if "=" in field)
+            if not self.planned:
+                raise ValueError("GPU emitted TEST before PLAN")
+            fields = self._fields(line, "TEST")
             if set(fields) != {"index", "q"}:
                 raise ValueError("malformed TEST record")
             index, q = int(fields["index"]), int(fields["q"])
-            if index != len(tested) or index >= len(candidates) or q != candidates[index]:
+            if index != len(self.tested) or index >= len(self.candidates) or q != self.candidates[index]:
                 raise ValueError("TEST does not match ordered candidate plan")
-            tested.append(q)
+            self.tested.append(q)
         elif line.startswith("FOUND "):
-            fields = dict(field.split("=", 1) for field in line.split()[1:] if "=" in field)
+            if not self.planned:
+                raise ValueError("GPU emitted FOUND before PLAN")
+            fields = self._fields(line, "FOUND")
             if set(fields) != {"index", "q", "p"}:
                 raise ValueError("malformed FOUND record")
             index, q, prime = int(fields["index"]), int(fields["q"]), int(fields["p"])
-            if not 0 <= index < len(candidates) or q != candidates[index]:
+            if not 0 <= index < len(self.candidates) or q != self.candidates[index] or index >= len(self.tested):
                 raise ValueError("FOUND does not match ordered candidate plan")
-            if prime != 2 * bases[0] * bases[1] * bases[2] * q + 1:
+            if prime != 2 * self.bases[0] * self.bases[1] * self.bases[2] * q + 1:
                 raise ValueError("FOUND has incorrect constructed p")
-            hits.append((q, prime))
-    if not planned:
-        raise ValueError("GPU did not emit PLAN")
-    if not done:
-        raise ValueError("GPU did not emit DONE")
-    if tested != candidates:
-        raise ValueError("GPU did not test the complete ordered candidate plan")
-    return hits
+            hit = (q, prime)
+            self.hits.append(hit)
+            if hit not in self.certified:
+                if self.on_found is not None:
+                    self.on_found(q, prime)
+                self.certified.add(hit)
+        elif line.startswith(("PLAN", "TEST", "FOUND", "DONE")):
+            raise ValueError("malformed GPU protocol record")
+
+    def finish(self):
+        if not self.planned:
+            raise ValueError("GPU did not emit PLAN")
+        if not self.done:
+            raise ValueError("GPU did not emit DONE")
+        if self.tested != self.candidates:
+            raise ValueError("GPU did not test the complete ordered candidate plan")
+        return self.hits
+
+
+def validate_protocol(output, bases, candidates):
+    validator = ProtocolValidator(bases, candidates)
+    for line in output.splitlines():
+        if line.startswith(("PLAN", "TEST", "FOUND", "DONE")):
+            validator.process(line)
+    return validator.finish()
 
 
 def _tee_stream(source, destination, captured):
@@ -154,22 +200,64 @@ def _tee_stream(source, destination, captured):
         destination.flush()
 
 
-def run_streamed(command):
+def _stream_stdout(source, destination, captured, validator, failed, process):
+    """Hide complete protocol lines while forwarding all non-protocol bytes."""
+    reader, pending, passthrough = getattr(source, "read1", source.read), bytearray(), False
+    prefixes = (b"PLAN", b"TEST", b"FOUND", b"DONE")
+    try:
+        while chunk := reader(64 * 1024):
+            captured.extend(chunk)
+            for byte in chunk:
+                if passthrough:
+                    destination.write(bytes((byte,)))
+                    if byte == ord("\n"):
+                        destination.flush()
+                        passthrough = False
+                    continue
+                pending.append(byte)
+                if byte == ord("\n"):
+                    line = pending[:-1].decode("ascii")
+                    validator.process(line)
+                    pending.clear()
+                elif not any(prefix.startswith(pending) or pending.startswith(prefix) for prefix in prefixes):
+                    destination.write(pending)
+                    pending.clear()
+                    passthrough = True
+            destination.flush()
+        if pending:
+            destination.write(pending)
+            destination.flush()
+    except Exception as error:
+        failed.append(error)
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+
+
+def run_streamed(command, bases=None, candidates=None, on_found=None):
     """Run a child with live, byte-for-byte output and collected protocol text."""
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert process.stdout is not None and process.stderr is not None
     stdout, stderr = bytearray(), bytearray()
     stdout_sink = getattr(sys.stdout, "buffer", sys.stdout)
     stderr_sink = getattr(sys.stderr, "buffer", sys.stderr)
-    threads = [
-        threading.Thread(target=_tee_stream, args=(process.stdout, stdout_sink, stdout)),
-        threading.Thread(target=_tee_stream, args=(process.stderr, stderr_sink, stderr)),
-    ]
+    validator = ProtocolValidator(bases, candidates, on_found) if bases is not None and candidates is not None else None
+    failed = []
+    stdout_target = _stream_stdout if validator is not None else _tee_stream
+    stdout_args = (process.stdout, stdout_sink, stdout, validator, failed, process) if validator else (process.stdout, stdout_sink, stdout)
+    threads = [threading.Thread(target=stdout_target, args=stdout_args), threading.Thread(target=_tee_stream, args=(process.stderr, stderr_sink, stderr))]
     for thread in threads:
         thread.start()
     returncode = process.wait()
     for thread in threads:
         thread.join()
+    process.stdout.close()
+    process.stderr.close()
+    if failed:
+        raise failed[0]
+    if validator is not None:
+        validator.finish()
     return returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
 
 
@@ -204,13 +292,16 @@ def run(args):
         base_file, candidate_file = directory / "bases", directory / "candidates"
         base_file.write_text("\n".join(map(str, bases)) + "\n", encoding="ascii")
         candidate_file.write_text("\n".join(map(str, candidates)) + ("\n" if candidates else ""), encoding="ascii")
-        returncode, stdout, stderr = run_streamed([str(binary), "--ordered", str(base_file), str(candidate_file)])
+        def certify_found(q, prime):
+            certify_gpu_found(q, prime, bases)
+            path = certificate_path(prime)
+            print(f"[+] CPU-certified GPU hit: {path} ({len(str(prime))} digits); updated TIP", flush=True)
+
+        returncode, stdout, stderr = run_streamed(
+            [str(binary), "--ordered", str(base_file), str(candidate_file)], bases, candidates, certify_found
+        )
     if returncode:
         raise RuntimeError(f"GPU program failed ({returncode}): {stderr.strip()}")
-    hits = validate_protocol(stdout, bases, candidates)
-    for q, prime in hits:
-        certify_gpu_found(q, prime, bases)
-        print(f"[+] CPU-certified GPU hit q={q}; updated TIP")
 
 
 def main():

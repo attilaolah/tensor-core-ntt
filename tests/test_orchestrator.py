@@ -51,6 +51,32 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), output.encode())
         self.assertEqual(orch.validate_protocol(protocol, [3, 5, 7], [11]), [])
 
+    def test_streamed_carriage_return_progress_is_live_and_protocol_stays_hidden(self):
+        output = b"PLAN count=1\nCUDA 10%\rCUDA 20%\rTEST index=0 q=11\nDONE\n"
+        visible = io.BytesIO()
+        with mock.patch.object(orch.sys, "stdout", mock.Mock(buffer=visible)):
+            returncode, protocol, _ = orch.run_streamed(
+                [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({output!r}); sys.stdout.flush()"],
+                [3, 5, 7], [11],
+            )
+        self.assertEqual(returncode, 0)
+        self.assertEqual(visible.getvalue(), b"CUDA 10%\rCUDA 20%\r")
+        self.assertEqual(orch.validate_protocol(protocol, [3, 5, 7], [11]), [])
+
+    def test_raw_candidate_progress_terminates_only_at_100_percent(self):
+        output = b"PLAN count=1\nCUDA 10%\rCUDA 99%\rCUDA 100%\nTEST index=0 q=11\nDONE\n"
+        visible = io.BytesIO()
+        with mock.patch.object(orch.sys, "stdout", mock.Mock(buffer=visible)):
+            returncode, protocol, _ = orch.run_streamed(
+                [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({output!r}); sys.stdout.flush()"],
+                [3, 5, 7], [11],
+            )
+        self.assertEqual(returncode, 0)
+        self.assertEqual(visible.getvalue(), b"CUDA 10%\rCUDA 99%\rCUDA 100%\n")
+        self.assertNotIn(b"running", visible.getvalue())
+        self.assertNotIn(b"x != 1", visible.getvalue())
+        self.assertEqual(orch.validate_protocol(protocol, [3, 5, 7], [11]), [])
+
     def test_streamed_found_is_hidden_certified_before_child_done_and_validated(self):
         bases, q = [3, 5, 7], 11
         prime = 2 * 3 * 5 * 7 * q + 1

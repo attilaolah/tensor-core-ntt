@@ -36,7 +36,7 @@ auto format_duration(std::chrono::seconds duration) -> std::string {
 void print_candidate_status(int thread_id, std::chrono::steady_clock::time_point
                                                candidate_start,
                             uint64_t q_val, size_t completed, size_t total,
-                            const std::string &result) {
+                            const std::string &result, bool terminate_line) {
   const auto now = std::chrono::steady_clock::now();
   const auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
       now - get_program_start());
@@ -54,8 +54,9 @@ void print_candidate_status(int thread_id, std::chrono::steady_clock::time_point
             << static_cast<unsigned long long>(completed) << " | N "
             << std::setw(5) << static_cast<unsigned long long>(total) << " | "
             << std::fixed << std::setprecision(2) << std::setw(6) << completion
-            << "%] [Q " << std::setw(11) << q_val << "] " << result << '\n'
-            << std::defaultfloat;
+            << "%] [Q " << std::setw(11) << q_val << "] " << result
+            << (terminate_line ? '\n' : '\r')
+            << std::defaultfloat << std::flush;
 }
 
 inline std::atomic<size_t> &get_completed_candidate_count() {
@@ -669,7 +670,7 @@ auto run_fermat_pipeline(
         print_candidate_status(thread_id, candidate_start, q_val,
                                get_completed_candidate_count().load(),
                                candidate_total,
-                               "running " + std::to_string(pct) + "%");
+                               std::to_string(pct) + "%", false);
       }
     }
   }
@@ -689,16 +690,12 @@ auto run_fermat_pipeline(
   float total_sec = ms / 1000.0f;
   float avg_us = ms * 1000.0f / squarings;
   bool is_prime = false;
-  std::string result_msg;
   if (mpz_cmp_ui(final_val, 1) == 0) {
     is_prime = true;
-    result_msg = "*** FOUND PROBABLE PRIME! ***";
-  } else {
-    result_msg = "x != 1 (" + std::to_string(mpz_get_ui(final_val)) + ")";
   }
   const size_t completed = get_completed_candidate_count().fetch_add(1) + 1;
   print_candidate_status(thread_id, candidate_start, q_val, completed,
-                         candidate_total, result_msg);
+                          candidate_total, "100%", true);
   mpz_clear(final_val);
   mpz_clear(p_minus_1);
   mpz_clear(mu);

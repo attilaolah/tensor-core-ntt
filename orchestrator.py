@@ -282,7 +282,7 @@ def _stream_stdout(source, destination, captured, validator, failed, process):
                     destination.write(bytes((byte,)))
                     if byte in (ord("\r"), ord("\n")):
                         destination.flush()
-                    if byte == ord("\n"):
+                    if byte in (ord("\r"), ord("\n")):
                         passthrough = False
                     continue
                 pending.append(byte)

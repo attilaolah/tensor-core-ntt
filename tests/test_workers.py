@@ -36,3 +36,20 @@ def test_protocol_rejects_duplicate_worker_test():
 def test_workers_must_be_positive(value):
     with pytest.raises(SystemExit):
         orchestrator.parse_args(["--workers", value])
+
+
+def test_progress_scheduler_allows_any_worker_to_claim_each_tick():
+    source = (Path(__file__).parents[1] / "src" / "crunch.cu").read_text()
+
+    scheduler = source[source.index("class ProgressLogSchedule") : source.index("auto format_duration")]
+    assert "claim_nonfinal_slot()" in scheduler
+    assert "claim_tick(tick)" in scheduler
+    assert "compare_exchange_weak" in scheduler
+    assert "tick % worker_count" not in scheduler
+
+
+def test_progress_scheduler_is_polled_more_often_than_percentage_updates():
+    source = (Path(__file__).parents[1] / "src" / "crunch.cu").read_text()
+
+    assert "constexpr int progress_poll_steps = 8;" in source
+    assert "squarings % progress_poll_steps == 0" in source

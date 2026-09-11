@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <iomanip>
 #include <iostream>
@@ -23,6 +24,39 @@ inline std::mutex &get_print_mutex() {
   static std::mutex print_mutex;
   return print_mutex;
 }
+
+class ProgressLogSchedule {
+ public:
+  ProgressLogSchedule() : start_(std::chrono::steady_clock::now()) {}
+
+  auto claim_nonfinal_slot() -> bool {
+    constexpr auto tick_duration = std::chrono::milliseconds(500);
+    const auto elapsed = std::chrono::steady_clock::now() - start_;
+    const auto tick = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() /
+        tick_duration.count());
+    return claim_tick(tick);
+  }
+
+  // Any worker may claim the current tick.  The compare-exchange preserves
+  // one human-status emitter per tick without making output depend on a
+  // particular worker reaching a checkpoint at the right instant.
+  auto claim_tick(uint64_t tick) -> bool {
+    uint64_t previous_tick = last_emitted_tick_.load(std::memory_order_relaxed);
+    while (previous_tick != tick) {
+      if (last_emitted_tick_.compare_exchange_weak(
+              previous_tick, tick, std::memory_order_relaxed,
+              std::memory_order_relaxed)) {
+        return true;
+      }
+    }
+    return false;
+ }
+
+ private:
+  std::chrono::steady_clock::time_point start_;
+  std::atomic<uint64_t> last_emitted_tick_{UINT64_MAX};
+};
 
 auto format_duration(std::chrono::seconds duration) -> std::string {
   const auto seconds = duration.count();
@@ -74,7 +108,6 @@ inline std::atomic<size_t> &get_completed_candidate_count() {
   return count;
 }
 
-#include <cstdint>
 #include <deque>
 #include <fstream>
 #include <future>
@@ -495,7 +528,8 @@ auto run_fermat_pipeline(
     StreamContext &ctx,
     const std::vector<uint64_t> &h_P_in = std::vector<uint64_t>(),
     const std::vector<uint64_t> &h_mu_in = std::vector<uint64_t>(),
-    int thread_id = 0, uint64_t q_val = 0, size_t candidate_total = 0) -> bool {
+    int thread_id = 0, uint64_t q_val = 0, size_t candidate_total = 0,
+    ProgressLogSchedule *progress_schedule = nullptr) -> bool {
   const auto candidate_start = std::chrono::steady_clock::now();
   (void)bit_len;
   std::vector<uint64_t> h_P = h_P_in;
@@ -672,15 +706,22 @@ auto run_fermat_pipeline(
       multiplies++;
     }
 
-    int one_percent = std::max<int>(1, total_steps / 100);
-    if (squarings % one_percent == 0 || squarings == total_steps) {
+    // Poll every few graph launches rather than only at percentage boundaries.
+    // This bounds scheduler latency for 33k+ bit exponents while avoiding a
+    // clock read for every launch.
+    constexpr int progress_poll_steps = 8;
+    if (squarings % progress_poll_steps == 0 || squarings == total_steps) {
       int pct = (squarings * 100) / total_steps;
 
-      if (pct < 100) {
-        print_candidate_status(thread_id, candidate_start, q_val,
-                               get_completed_candidate_count().load(),
+       if (pct < 100 &&
+            (progress_schedule == nullptr ||
+             progress_schedule->claim_nonfinal_slot())) {
+         print_candidate_status(thread_id, candidate_start, q_val,
+                                get_completed_candidate_count().load(),
                                candidate_total,
-                               std::to_string(pct) + "%", false);
+                                std::string(3 - std::to_string(pct).size(), ' ') +
+                                    std::to_string(pct) + "%",
+                                false);
       }
     }
   }
@@ -1092,9 +1133,10 @@ auto main(int argc, char **argv) -> int {
           return 2;
         }
         ordered_candidates.push_back(q);
-      }
-      std::atomic<size_t> next_index{0};
-      auto ordered_worker = [&](size_t worker_id) {
+       }
+       std::atomic<size_t> next_index{0};
+        ProgressLogSchedule ordered_progress_schedule;
+       auto ordered_worker = [&](size_t worker_id) {
         StreamContext context;
         while (true) {
           const size_t index = next_index.fetch_add(1);
@@ -1117,9 +1159,9 @@ auto main(int argc, char **argv) -> int {
           const bool passed = run_fermat_pipeline(
               candidate.p, candidate.bit_len, candidate.d, candidate.N_val,
               modulus.invert(candidate.N_val), modulus,
-              thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
-              context, candidate.h_P, candidate.h_mu, static_cast<int>(worker_id),
-              q, ordered_candidates.size());
+               thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
+               context, candidate.h_P, candidate.h_mu, static_cast<int>(worker_id),
+               q, ordered_candidates.size(), &ordered_progress_schedule);
           if (passed) {
             char *p_string = mpz_get_str(nullptr, 10, candidate.p);
             std::lock_guard<std::mutex> lock(get_print_mutex());

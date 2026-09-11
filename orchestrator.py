@@ -179,12 +179,12 @@ def certify_gpu_found(q, prime, bases, data_dir=DATA_DIR, tip_file=TIP_FILE):
 
 
 class ProtocolValidator:
-    """Validate ordered GPU records, invoking ``on_found`` before more work runs."""
+    """Validate a deterministic GPU plan whose worker completion may be unordered."""
 
     def __init__(self, bases, candidates, on_found=None):
         self.bases, self.candidates, self.on_found = bases, candidates, on_found
-        self.hits, self.done, self.tested, self.planned = [], False, [], False
-        self.certified = set()
+        self.hits, self.done, self.tested, self.planned = [], False, set(), False
+        self.certified, self.found_indices = set(), set()
 
     @staticmethod
     def _fields(line, record):
@@ -210,7 +210,7 @@ class ProtocolValidator:
                 raise ValueError("PLAN does not match ordered candidate plan")
             self.planned = True
         elif line == "DONE":
-            if not self.planned or self.tested != self.candidates:
+            if not self.planned or len(self.tested) != len(self.candidates):
                 raise ValueError("GPU emitted DONE before the complete ordered candidate plan")
             self.done = True
         elif line.startswith("TEST "):
@@ -220,9 +220,9 @@ class ProtocolValidator:
             if set(fields) != {"index", "q"}:
                 raise ValueError("malformed TEST record")
             index, q = int(fields["index"]), int(fields["q"])
-            if index != len(self.tested) or index >= len(self.candidates) or q != self.candidates[index]:
+            if index < 0 or index >= len(self.candidates) or q != self.candidates[index] or index in self.tested:
                 raise ValueError("TEST does not match ordered candidate plan")
-            self.tested.append(q)
+            self.tested.add(index)
         elif line.startswith("FOUND "):
             if not self.planned:
                 raise ValueError("GPU emitted FOUND before PLAN")
@@ -230,11 +230,12 @@ class ProtocolValidator:
             if set(fields) != {"index", "q", "p"}:
                 raise ValueError("malformed FOUND record")
             index, q, prime = int(fields["index"]), int(fields["q"]), int(fields["p"])
-            if not 0 <= index < len(self.candidates) or q != self.candidates[index] or index >= len(self.tested):
+            if not 0 <= index < len(self.candidates) or q != self.candidates[index] or index not in self.tested or index in self.found_indices:
                 raise ValueError("FOUND does not match ordered candidate plan")
             if prime != 2 * self.bases[0] * self.bases[1] * self.bases[2] * q + 1:
                 raise ValueError("FOUND has incorrect constructed p")
             hit = (q, prime)
+            self.found_indices.add(index)
             self.hits.append(hit)
             if hit not in self.certified:
                 if self.on_found is not None:
@@ -248,7 +249,7 @@ class ProtocolValidator:
             raise ValueError("GPU did not emit PLAN")
         if not self.done:
             raise ValueError("GPU did not emit DONE")
-        if self.tested != self.candidates:
+        if len(self.tested) != len(self.candidates):
             raise ValueError("GPU did not test the complete ordered candidate plan")
         return self.hits
 
@@ -358,6 +359,7 @@ def run(args):
     print(f"[+] Found Base Primes: {len(str(bases[0]))} digits, {len(str(bases[1]))} digits, {len(str(bases[2]))} digits")
     print(f"[*] Built Sieve of Eratosthenes up to {args.sieve_limit}; {len(candidates)} candidates survive")
     print(f"[*] Seed: {args.seed}; plan hash: {digest}; candidate count: {len(candidates)}", flush=True)
+    print(f"[*] GPU workers/streams: {args.workers}", flush=True)
     if args.write_candidate_plan:
         print(f"[*] Wrote candidate plan: {args.write_candidate_plan}")
     print("[*] Starting ordered GPU Fermat search...", flush=True)
@@ -369,33 +371,46 @@ def run(args):
         base_file, candidate_file = directory / "bases", directory / "candidates"
         base_file.write_text("\n".join(map(str, bases)) + "\n", encoding="ascii")
         candidate_file.write_text("\n".join(map(str, candidates)) + ("\n" if candidates else ""), encoding="ascii")
+        certification_lock = threading.Lock()
+
         def certify_found(q, prime):
-            certify_gpu_found(q, prime, bases)
-            path = certificate_path(prime)
-            print(f"[+] CPU-certified GPU hit: {path} ({len(str(prime))} digits); updated TIP", flush=True)
+            # Keep the certificate set and TIP update atomic even if the output
+            # transport is later changed to dispatch FOUND records in parallel.
+            with certification_lock:
+                certify_gpu_found(q, prime, bases)
+                path = certificate_path(prime)
+                print(f"[+] CPU-certified GPU hit: {path} ({len(str(prime))} digits); updated TIP", flush=True)
 
         returncode, stdout, stderr = run_streamed(
-            [str(binary), "--ordered", str(base_file), str(candidate_file)], bases, candidates, certify_found
+            [str(binary), "--workers", str(args.workers), "--ordered", str(base_file), str(candidate_file)], bases, candidates, certify_found
         )
     if returncode:
         raise RuntimeError(f"GPU program failed ({returncode}): {stderr.strip()}")
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-digits", type=int)
     parser.add_argument("--sieve-limit", type=int, default=5_000_000_000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--gpu-binary")
+    parser.add_argument("--workers", type=int, default=1, help="positive GPU host worker/stream count")
     parser.add_argument("--candidate-plan", help="consume a persisted plan before invoking crunch --ordered")
     parser.add_argument("--write-candidate-plan", help="persist the selected bases and ordered candidates")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.max_digits is not None and args.max_digits <= 0:
         parser.error("--max-digits must be a positive integer")
     if args.sieve_limit <= 0:
         parser.error("--sieve-limit must be a positive integer")
+    if args.workers <= 0:
+        parser.error("--workers must be a positive integer")
     if not 0 <= args.seed <= MASK64:
         parser.error("--seed must be an unsigned 64-bit integer")
+    return args
+
+
+def main():
+    args = parse_args()
     try:
         run(args)
     except (OSError, RuntimeError, ValueError) as error:

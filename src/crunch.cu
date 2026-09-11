@@ -33,6 +33,16 @@ auto format_duration(std::chrono::seconds duration) -> std::string {
   return buffer;
 }
 
+auto format_uptime(std::chrono::seconds duration) -> std::string {
+  const auto seconds = duration.count();
+  char buffer[32];
+  snprintf(buffer, sizeof(buffer), "%02lld:%02lld:%02lld",
+           static_cast<long long>(seconds / 3600),
+           static_cast<long long>((seconds / 60) % 60),
+           static_cast<long long>(seconds % 60));
+  return buffer;
+}
+
 void print_candidate_status(int thread_id, std::chrono::steady_clock::time_point
                                                candidate_start,
                             uint64_t q_val, size_t completed, size_t total,
@@ -49,7 +59,7 @@ void print_candidate_status(int thread_id, std::chrono::steady_clock::time_point
 
   std::lock_guard<std::mutex> lock(get_print_mutex());
   std::cout << "[T" << std::setfill('0') << std::setw(2) << thread_id
-            << std::setfill(' ') << " | " << format_duration(uptime) << " | F "
+            << std::setfill(' ') << " | " << format_uptime(uptime) << " | F "
             << format_duration(candidate_duration) << "] [C " << std::setw(5)
             << static_cast<unsigned long long>(completed) << " | N "
             << std::setw(5) << static_cast<unsigned long long>(total) << " | "
@@ -904,6 +914,7 @@ auto main(int argc, char **argv) -> int {
   std::string sieve_file_name = "";
   bool is_crunch = false;
   bool ordered_mode = false;
+  size_t workers = 1;
   bool fermat_regression = false;
   std::string ordered_bases_file;
   std::string ordered_candidates_file;
@@ -947,6 +958,22 @@ auto main(int argc, char **argv) -> int {
       ordered_bases_file = argv[++i];
       ordered_candidates_file = argv[++i];
       is_crunch = true;
+    }
+    if (arg == "--workers") {
+      if (i + 1 >= argc || !is_decimal(argv[i + 1])) {
+        std::cerr << "ERROR --workers requires a positive integer\n";
+        return 2;
+      }
+      try {
+        workers = std::stoull(argv[++i]);
+      } catch (const std::exception &) {
+        std::cerr << "ERROR --workers requires a positive integer\n";
+        return 2;
+      }
+      if (workers == 0) {
+        std::cerr << "ERROR --workers requires a positive integer\n";
+        return 2;
+      }
     }
     if (arg == "--fermat-regression") {
       fermat_regression = true;
@@ -1025,7 +1052,12 @@ auto main(int argc, char **argv) -> int {
         mpz_mul(K, K, base);
         mpz_clear(base);
       }
+      std::cout << "WORKERS count=" << workers << '\n';
       std::cout << "PLAN count=" << candidate_strings.size() << '\n';
+      // The plan itself is deterministic.  With multiple workers, TEST and
+      // completion records may be emitted in a different order.
+      std::vector<uint64_t> ordered_candidates;
+      ordered_candidates.reserve(candidate_strings.size());
       for (size_t index = 0; index < candidate_strings.size(); ++index) {
         const std::string &q_string = candidate_strings[index];
         if (q_string.size() > 20) {
@@ -1046,35 +1078,72 @@ auto main(int argc, char **argv) -> int {
           mpz_clear(K);
           return 2;
         }
-        std::cout << "TEST index=" << index << " q=" << q << '\n';
-        Candidate candidate;
-        candidate.q_val = q;
-        mpz_mul_ui(candidate.p, K, q);
-        mpz_add_ui(candidate.p, candidate.p, 1);
-        candidate.bit_len = mpz_sizeinbase(candidate.p, 2);
-        candidate.d = (candidate.bit_len + 15) / 16;
-        candidate.N_val = candidate.bit_len <= 32000 ? 4096 : 65536;
-        if (2 * candidate.d + 2 > candidate.N_val) {
+        mpz_t candidate_p;
+        mpz_init(candidate_p);
+        mpz_mul_ui(candidate_p, K, q);
+        mpz_add_ui(candidate_p, candidate_p, 1);
+        const size_t candidate_bits = mpz_sizeinbase(candidate_p, 2);
+        const size_t candidate_d = (candidate_bits + 15) / 16;
+        const size_t candidate_n = candidate_bits <= 32000 ? 4096 : 65536;
+        mpz_clear(candidate_p);
+        if (2 * candidate_d + 2 > candidate_n) {
           std::cerr << "ERROR candidate exceeds supported transform size\n";
           mpz_clear(K);
           return 2;
         }
-        uint64_t inv_n = modulus.invert(candidate.N_val);
+        ordered_candidates.push_back(q);
+      }
+      std::atomic<size_t> next_index{0};
+      auto ordered_worker = [&](size_t worker_id) {
         StreamContext context;
-        bool passed = run_fermat_pipeline(
-            candidate.p, candidate.bit_len, candidate.d, candidate.N_val, inv_n,
-            modulus, thrust::raw_pointer_cast(precomp_device.get()),
-            constant_precomp, context, candidate.h_P, candidate.h_mu, 0, q,
-            candidate_strings.size());
-        if (passed) {
-          char *p_string = mpz_get_str(nullptr, 10, candidate.p);
-          std::cout << "FOUND index=" << index << " q=" << q
-                    << " p=" << p_string << '\n';
-          free(p_string);
+        while (true) {
+          const size_t index = next_index.fetch_add(1);
+          if (index >= ordered_candidates.size()) {
+            return;
+          }
+          const uint64_t q = ordered_candidates[index];
+          {
+            std::lock_guard<std::mutex> lock(get_print_mutex());
+            std::cout << "TEST index=" << index << " q=" << q << '\n'
+                      << std::flush;
+          }
+          Candidate candidate;
+          candidate.q_val = q;
+          mpz_mul_ui(candidate.p, K, q);
+          mpz_add_ui(candidate.p, candidate.p, 1);
+          candidate.bit_len = mpz_sizeinbase(candidate.p, 2);
+          candidate.d = (candidate.bit_len + 15) / 16;
+          candidate.N_val = candidate.bit_len <= 32000 ? 4096 : 65536;
+          const bool passed = run_fermat_pipeline(
+              candidate.p, candidate.bit_len, candidate.d, candidate.N_val,
+              modulus.invert(candidate.N_val), modulus,
+              thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
+              context, candidate.h_P, candidate.h_mu, static_cast<int>(worker_id),
+              q, ordered_candidates.size());
+          if (passed) {
+            char *p_string = mpz_get_str(nullptr, 10, candidate.p);
+            std::lock_guard<std::mutex> lock(get_print_mutex());
+            std::cout << "FOUND index=" << index << " q=" << q
+                      << " p=" << p_string << '\n' << std::flush;
+            free(p_string);
+          }
+        }
+      };
+      if (workers == 1) {
+        ordered_worker(0);
+      } else {
+        std::vector<std::thread> ordered_threads;
+        ordered_threads.reserve(workers);
+        for (size_t worker_id = 0; worker_id < workers; ++worker_id) {
+          ordered_threads.emplace_back(ordered_worker, worker_id);
+        }
+        for (auto &thread : ordered_threads) {
+          thread.join();
         }
       }
       mpz_clear(K);
-      std::cout << "DONE\n";
+      std::lock_guard<std::mutex> lock(get_print_mutex());
+      std::cout << "DONE\n" << std::flush;
       return 0;
     }
     std::cout << "--- Crunch Mode ---" << '\n';

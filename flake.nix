@@ -66,6 +66,8 @@
           buildInputs = with pkgs; [
             boost
             cudaPackages.cudatoolkit
+            cudaPackages.nsight_compute
+            cudaPackages.nsight_systems
             gmp
             pkg-config
             clang-tools

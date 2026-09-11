@@ -7,6 +7,7 @@
 #include <string>
 // test-fermat.cu
 #include <cuda_runtime.h>
+#include <cuda_profiler_api.h>
 #include <gmp.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
@@ -843,6 +844,15 @@ auto is_decimal(const std::string &value) -> bool {
          });
 }
 
+auto check_cuda_profiler(cudaError_t error, const char *operation) -> bool {
+  if (error == cudaSuccess) {
+    return true;
+  }
+  std::cerr << "ERROR " << operation << " failed: "
+            << cudaGetErrorString(error) << '\n';
+  return false;
+}
+
 auto read_ordered_lines(const std::string &path,
                         std::vector<std::string> &values, const char *kind,
                         bool allow_empty = false) -> bool {
@@ -959,6 +969,8 @@ auto main(int argc, char **argv) -> int {
   bool fermat_regression = false;
   std::string ordered_bases_file;
   std::string ordered_candidates_file;
+  bool profile_candidate_requested = false;
+  size_t profile_candidate_index = 0;
 
   // Default to crunch mode if no arguments are provided
   if (argc == 1) {
@@ -1016,6 +1028,21 @@ auto main(int argc, char **argv) -> int {
         return 2;
       }
     }
+    if (arg == "--profile-candidate-index") {
+      if (i + 1 >= argc || !is_decimal(argv[i + 1])) {
+        std::cerr
+            << "ERROR --profile-candidate-index requires a zero-based index\n";
+        return 2;
+      }
+      try {
+        profile_candidate_index = std::stoull(argv[++i]);
+      } catch (const std::exception &) {
+        std::cerr
+            << "ERROR --profile-candidate-index requires a zero-based index\n";
+        return 2;
+      }
+      profile_candidate_requested = true;
+    }
     if (arg == "--fermat-regression") {
       fermat_regression = true;
     }
@@ -1067,6 +1094,16 @@ auto main(int argc, char **argv) -> int {
     return 0;
   }
 
+  if (profile_candidate_requested && !ordered_mode) {
+    std::cerr << "ERROR --profile-candidate-index requires --ordered\n";
+    return 2;
+  }
+  if (profile_candidate_requested && workers != 1) {
+    std::cerr
+        << "ERROR --profile-candidate-index requires exactly --workers 1\n";
+    return 2;
+  }
+
   if (is_crunch) {
     if (ordered_mode) {
       std::vector<std::string> base_strings;
@@ -1076,6 +1113,12 @@ auto main(int argc, char **argv) -> int {
                               "candidate", true) ||
           base_strings.size() != 3) {
         std::cerr << "ERROR ordered mode requires exactly three base primes\n";
+        return 2;
+      }
+      if (profile_candidate_requested &&
+          profile_candidate_index >= candidate_strings.size()) {
+        std::cerr << "ERROR --profile-candidate-index is outside the ordered "
+                     "candidate list\n";
         return 2;
       }
       mpz_t K;
@@ -1135,14 +1178,16 @@ auto main(int argc, char **argv) -> int {
         ordered_candidates.push_back(q);
        }
        std::atomic<size_t> next_index{0};
-        ProgressLogSchedule ordered_progress_schedule;
-       auto ordered_worker = [&](size_t worker_id) {
-        StreamContext context;
-        while (true) {
-          const size_t index = next_index.fetch_add(1);
-          if (index >= ordered_candidates.size()) {
-            return;
-          }
+       bool profile_candidate_reached = false;
+       ProgressLogSchedule ordered_progress_schedule;
+       auto ordered_worker = [&](size_t worker_id) -> bool {
+         StreamContext context;
+         try {
+           while (true) {
+           const size_t index = next_index.fetch_add(1);
+           if (index >= ordered_candidates.size()) {
+             return true;
+           }
           const uint64_t q = ordered_candidates[index];
           {
             std::lock_guard<std::mutex> lock(get_print_mutex());
@@ -1156,34 +1201,83 @@ auto main(int argc, char **argv) -> int {
           candidate.bit_len = mpz_sizeinbase(candidate.p, 2);
           candidate.d = (candidate.bit_len + 15) / 16;
           candidate.N_val = candidate.bit_len <= 32000 ? 4096 : 65536;
-          const bool passed = run_fermat_pipeline(
-              candidate.p, candidate.bit_len, candidate.d, candidate.N_val,
-              modulus.invert(candidate.N_val), modulus,
-               thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
-               context, candidate.h_P, candidate.h_mu, static_cast<int>(worker_id),
-               q, ordered_candidates.size(), &ordered_progress_schedule);
-          if (passed) {
+           const bool profile_this_candidate =
+               profile_candidate_requested && index == profile_candidate_index;
+           if (profile_this_candidate) {
+             profile_candidate_reached = true;
+             if (!check_cuda_profiler(cudaProfilerStart(), "cudaProfilerStart")) {
+               return false;
+             }
+           }
+
+           bool passed;
+           try {
+             passed = run_fermat_pipeline(
+                 candidate.p, candidate.bit_len, candidate.d, candidate.N_val,
+                 modulus.invert(candidate.N_val), modulus,
+                 thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
+                 context, candidate.h_P, candidate.h_mu,
+                 static_cast<int>(worker_id), q, ordered_candidates.size(),
+                 &ordered_progress_schedule);
+            } catch (...) {
+              if (profile_this_candidate) {
+                check_cuda_profiler(cudaProfilerStop(), "cudaProfilerStop");
+              }
+              throw;
+            }
+           if (profile_this_candidate &&
+               !check_cuda_profiler(cudaProfilerStop(), "cudaProfilerStop")) {
+             return false;
+           }
+           if (passed) {
             char *p_string = mpz_get_str(nullptr, 10, candidate.p);
             std::lock_guard<std::mutex> lock(get_print_mutex());
-            std::cout << "FOUND index=" << index << " q=" << q
-                      << " p=" << p_string << '\n' << std::flush;
-            free(p_string);
+             std::cout << "FOUND index=" << index << " q=" << q
+                       << " p=" << p_string << '\n' << std::flush;
+             free(p_string);
+            }
+            if (profile_this_candidate) {
+              return true;
+            }
           }
+        } catch (const std::exception &error) {
+          std::lock_guard<std::mutex> lock(get_print_mutex());
+          std::cerr << "ERROR ordered candidate execution failed: "
+                    << error.what() << '\n';
+          return false;
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(get_print_mutex());
+          std::cerr << "ERROR ordered candidate execution failed\n";
+          return false;
         }
-      };
-      if (workers == 1) {
-        ordered_worker(0);
-      } else {
+       };
+       std::atomic<bool> ordered_run_ok{true};
+       if (workers == 1) {
+         ordered_run_ok.store(ordered_worker(0));
+       } else {
         std::vector<std::thread> ordered_threads;
         ordered_threads.reserve(workers);
         for (size_t worker_id = 0; worker_id < workers; ++worker_id) {
-          ordered_threads.emplace_back(ordered_worker, worker_id);
+           ordered_threads.emplace_back([&, worker_id] {
+             if (!ordered_worker(worker_id)) {
+               ordered_run_ok.store(false);
+             }
+           });
         }
         for (auto &thread : ordered_threads) {
           thread.join();
-        }
-      }
-      mpz_clear(K);
+         }
+       }
+       if (!ordered_run_ok.load()) {
+         mpz_clear(K);
+         return 1;
+       }
+       if (profile_candidate_requested && !profile_candidate_reached) {
+         std::cerr << "ERROR requested profile candidate index was not reached\n";
+         mpz_clear(K);
+         return 1;
+       }
+       mpz_clear(K);
       std::lock_guard<std::mutex> lock(get_print_mutex());
       std::cout << "DONE\n" << std::flush;
       return 0;

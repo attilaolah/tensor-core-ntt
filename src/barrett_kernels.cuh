@@ -97,19 +97,34 @@ __global__ void single_block_arbitrary_conditional_sub_p_kernel(
         }
       }
 
-      __shared__ int shared_max_idx;
+      __shared__ int shared_warp_max[32];
       __shared__ int shared_max_sign;
-      if (tid == 0) {
-        shared_max_idx = -1;
-        shared_max_sign = 0;
+      int lane = tid & 31;
+      int warp = tid >> 5;
+      int warp_max = local_highest;
+      for (int offset = 16; offset > 0; offset /= 2) {
+        warp_max = max(warp_max, __shfl_down_sync(0xffffffff, warp_max, offset));
+      }
+      if (lane == 0) {
+        shared_warp_max[warp] = warp_max;
       }
       __syncthreads();
 
-      if (local_highest != -1) {
-        atomicMax(&shared_max_idx, local_highest);
+      int block_max = -1;
+      if (warp == 0) {
+        block_max = shared_warp_max[lane];
+        for (int offset = 16; offset > 0; offset /= 2) {
+          block_max = max(block_max,
+                          __shfl_down_sync(0xffffffff, block_max, offset));
+        }
+        if (lane == 0) {
+          shared_warp_max[0] = block_max;
+          shared_max_sign = 0;
+        }
       }
       __syncthreads();
 
+      int shared_max_idx = shared_warp_max[0];
       if (local_highest == shared_max_idx && local_highest != -1) {
         shared_max_sign = local_sign;
       }

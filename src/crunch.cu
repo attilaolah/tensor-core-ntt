@@ -211,24 +211,39 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
     int changed = 1;
     while (changed) {
       changed = 0;
+      int local_changed = 0;
       for (int i = 0; i < 4; ++i) {
         int local_idx = tid + i * 1024;
-        if (base + local_idx >= n) {
-          continue;
-        }
+        if (base + local_idx >= n) continue;
 
         uint64_t val = smem[local_idx];
         uint64_t c = val >> 16;
-        if (c > 0) {
-          changed = 1;
-          atomicAdd(reinterpret_cast<unsigned long long *>(&smem[local_idx]),
-                    -static_cast<unsigned long long>(c << 16));
-          atomicAdd(
-              reinterpret_cast<unsigned long long *>(&smem[local_idx + 1]),
-              static_cast<unsigned long long>(c));
+        val &= 0xFFFF;
+
+        uint32_t lane = threadIdx.x & 31;
+
+        // 5-step Kogge-Stone parallel prefix sum for intra-warp carry
+        // propagation.
+#pragma unroll
+        for (int offset = 1; offset < 32; offset *= 2) {
+          uint64_t c_in = __shfl_up_sync(0xffffffff, c, offset);
+          if (lane >= offset) {
+            val += c_in;
+            c += (val >> 16);
+            val &= 0xFFFF;
+          }
+        }
+
+        smem[local_idx] = val;
+
+        // Cross-warp boundary fallback.
+        if (lane == 31 && c > 0) {
+          atomicAdd(reinterpret_cast<unsigned long long *>(&smem[local_idx + 1]),
+                    static_cast<unsigned long long>(c));
+          local_changed = 1;
         }
       }
-      changed = __syncthreads_or(changed);
+      changed = __syncthreads_or(local_changed);
     }
 
     carry_in = smem[4096];

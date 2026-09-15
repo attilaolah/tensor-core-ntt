@@ -38,6 +38,12 @@ def test_workers_must_be_positive(value):
         orchestrator.parse_args(["--workers", value])
 
 
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_max_candidates_must_be_positive(value):
+    with pytest.raises(SystemExit):
+        orchestrator.parse_args(["--max-candidates", value])
+
+
 def test_progress_scheduler_allows_any_worker_to_claim_each_tick():
     source = (Path(__file__).parents[1] / "src" / "crunch.cu").read_text()
 

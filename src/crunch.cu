@@ -1,5 +1,6 @@
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <iomanip>
 #include <iostream>
@@ -8,6 +9,7 @@
 // test-fermat.cu
 #include <cuda_runtime.h>
 #include <cuda_profiler_api.h>
+#include <cub/block/block_scan.cuh>
 #include <gmp.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
@@ -182,9 +184,99 @@ __global__ void inverse_ntt_scale(uint64_t *data, uint64_t inv_n,
   }
 }
 
-__global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
-                                                       size_t n) {
+__global__ void delayed_carry_kernel(uint64_t *data, size_t n) {
+    __shared__ uint64_t smem[4096];
+    // These are raw words at base-3, base-2, and base-1.
+    __shared__ uint64_t previous_raw[3];
+
+    if (threadIdx.x == 0) {
+        previous_raw[0] = 0;
+        previous_raw[1] = 0;
+        previous_raw[2] = 0;
+    }
+    __syncthreads();
+
+    for (size_t base = 0; base < n; base += 4096) {
+        int tid = threadIdx.x;
+
+        for (int i = 0; i < 4; ++i) {
+            int local_idx = tid + i * 1024;
+            if (base + local_idx < n) smem[local_idx] = data[base + local_idx];
+        }
+        __syncthreads();
+
+        uint64_t new_val[4];
+        for (int i = 0; i < 4; ++i) {
+            int local_idx = tid + i * 1024;
+            if (base + local_idx < n) {
+                uint64_t limb = smem[local_idx] & 0xFFFF;
+                for (int word = 1; word < 4; ++word) {
+                    const int source = local_idx - word;
+                    const uint64_t raw = source >= 0
+                                             ? smem[source]
+                                             : previous_raw[source + 3];
+                    limb += (raw >> (16 * word)) & 0xFFFF;
+                }
+                new_val[i] = limb;
+            }
+        }
+        __syncthreads();
+
+        if (tid == 0) {
+            const int count = min(static_cast<size_t>(4096), n - base);
+            if (count >= 3) {
+                previous_raw[0] = smem[count - 3];
+                previous_raw[1] = smem[count - 2];
+                previous_raw[2] = smem[count - 1];
+            } else if (count == 2) {
+                previous_raw[0] = previous_raw[2];
+                previous_raw[1] = smem[0];
+                previous_raw[2] = smem[1];
+            } else {
+                previous_raw[0] = previous_raw[1];
+                previous_raw[1] = previous_raw[2];
+                previous_raw[2] = smem[0];
+            }
+        }
+
+        for (int i = 0; i < 4; ++i) {
+            int local_idx = tid + i * 1024;
+            if (base + local_idx < n) {
+                smem[local_idx] = new_val[i];
+                data[base + local_idx] = new_val[i];
+            }
+        }
+        __syncthreads();
+    }
+}
+
+struct CarryTransform {
+  // The packed P bit is inverted so the all-zero value is the identity
+  // transform (G=0, P=1) required by CUB's exclusive scan.
+  __device__ static auto pack(bool generate, bool propagate) -> uint64_t {
+    return static_cast<uint64_t>(generate) |
+           (static_cast<uint64_t>(!propagate) << 1);
+  }
+
+  __device__ static auto generate(uint64_t state) -> bool {
+    return (state & 1) != 0;
+  }
+
+  __device__ static auto propagate(uint64_t state) -> bool {
+    return (state & 2) == 0;
+  }
+
+  // rhs composes after lhs: G = Gr || (Pr && Gl), P = Pr && Pl.
+  __device__ auto operator()(uint64_t lhs, uint64_t rhs) const -> uint64_t {
+    return pack(generate(rhs) || (propagate(rhs) && generate(lhs)),
+                propagate(rhs) && propagate(lhs));
+  }
+};
+
+__global__ void strict_normalize_kernel(uint64_t *data, size_t n) {
   __shared__ uint64_t smem[4097];
+  using BlockScan = cub::BlockScan<uint64_t, 1024>;
+  __shared__ typename BlockScan::TempStorage scan_storage;
   int tid = threadIdx.x;
 
   uint64_t carry_in = 0;
@@ -202,51 +294,54 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
         smem[local_idx] = 0;
       }
     }
-    if (tid == 0) {
-      smem[4096] = 0;
-      smem[0] += carry_in;
-    }
+    if (tid == 0) smem[4096] = carry_in;
     __syncthreads();
 
-    int changed = 1;
-    while (changed) {
-      changed = 0;
-      int local_changed = 0;
-      for (int i = 0; i < 4; ++i) {
-        int local_idx = tid + i * 1024;
-        if (base + local_idx >= n) continue;
+    // Scan each contiguous 1024-limb segment collectively.  scan_storage is
+    // separate from smem so this remains valid for zero-dynamic-shared-memory
+    // launches.
+    for (int segment = 0; segment < 4; ++segment) {
+      const int local_idx = segment * 1024 + tid;
+      const int global_idx = base + local_idx;
+      const bool valid = global_idx < n;
+      constexpr uint64_t radix = UINT64_C(1) << 16;
+      const uint64_t value = valid ? smem[local_idx] : 0;
+      const uint64_t remainder = value & 0xFFFF;
+      const uint64_t prior_generate =
+          tid > 0 && valid ? smem[local_idx - 1] >> 16 : 0;
+      const uint64_t base_value = remainder + prior_generate;
+      const uint64_t first_carry = (remainder + carry_in) >> 16;
+      const uint64_t transform =
+          !valid ? CarryTransform::pack(false, true)
+                 : tid == 0 ? CarryTransform::pack(first_carry != 0, false)
+                            : CarryTransform::pack(base_value >= radix,
+                                                   base_value == radix - 1);
+      uint64_t prefix;
 
-        uint64_t val = smem[local_idx];
-        uint64_t c = val >> 16;
-        val &= 0xFFFF;
+      // Every lane participates; invalid lanes contribute the identity.
+      BlockScan(scan_storage).ExclusiveScan(transform, prefix,
+                                             CarryTransform());
 
-        uint32_t lane = threadIdx.x & 31;
-
-        // 5-step Kogge-Stone parallel prefix sum for intra-warp carry
-        // propagation.
-#pragma unroll
-        for (int offset = 1; offset < 32; offset *= 2) {
-          uint64_t c_in = __shfl_up_sync(0xffffffff, c, offset);
-          if (lane >= offset) {
-            val += c_in;
-            c += (val >> 16);
-            val &= 0xFFFF;
-          }
-        }
-
-        smem[local_idx] = val;
-
-        // Cross-warp boundary fallback.
-        if (lane == 31 && c > 0) {
-          atomicAdd(reinterpret_cast<unsigned long long *>(&smem[local_idx + 1]),
-                    static_cast<unsigned long long>(c));
-          local_changed = 1;
-        }
+      const uint64_t previous_carry = CarryTransform::generate(prefix);
+      if (valid) {
+        const uint64_t digit_value = tid == 0 ? remainder + carry_in
+                                               : base_value + previous_carry;
+        smem[local_idx] = digit_value & 0xFFFF;
       }
-      changed = __syncthreads_or(local_changed);
+
+      const size_t segment_start = static_cast<size_t>(base) + segment * 1024;
+      const size_t segment_length =
+          segment_start < n ? min(static_cast<size_t>(1024), n - segment_start)
+                            : 0;
+      if (tid == static_cast<int>(segment_length) - 1) {
+        const uint64_t final_carry =
+            CarryTransform::generate(CarryTransform()(prefix, transform));
+        smem[4096] = (value >> 16) + final_carry;
+      }
+      __syncthreads();
+      carry_in = smem[4096];
     }
 
-    carry_in = smem[4096];
     __syncthreads();
 
     for (int i = 0; i < 4; ++i) {
@@ -258,10 +353,6 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
     }
     __syncthreads();
   }
-}
-
-void launch_resolve_carries(uint64_t *d_data, size_t n, cudaStream_t stream) {
-  single_block_arbitrary_resolve_carries<<<1, 1024, 0, stream>>>(d_data, n);
 }
 
 __global__ void single_block_arbitrary_sub_kernel(uint64_t *r,
@@ -644,7 +735,7 @@ auto run_fermat_pipeline(
                                   mod_val, stream);
   cudaEventRecord(ctx.ntt_end[1], stream);
   cudaEventRecord(ctx.carry_start[0], stream);
-  launch_resolve_carries(raw_T, N_val, stream);
+  delayed_carry_kernel<<<1, 1024, 0, stream>>>(raw_T, N_val);
   cudaEventRecord(ctx.carry_end[0], stream);
 
   // Step 2: Q = floor(T / B^(d-1)) * mu
@@ -663,7 +754,7 @@ auto run_fermat_pipeline(
                                   mod_val, stream);
   cudaEventRecord(ctx.ntt_end[3], stream);
   cudaEventRecord(ctx.carry_start[1], stream);
-  launch_resolve_carries(raw_Z1, N_val, stream);
+  delayed_carry_kernel<<<1, 1024, 0, stream>>>(raw_Z1, N_val);
   cudaEventRecord(ctx.carry_end[1], stream);
 
   // Step 3: Q = Q / B^(d+1)
@@ -686,12 +777,13 @@ auto run_fermat_pipeline(
                                   mod_val, stream);
   cudaEventRecord(ctx.ntt_end[5], stream);
   cudaEventRecord(ctx.carry_start[2], stream);
-  launch_resolve_carries(raw_Z2, N_val, stream);
+  delayed_carry_kernel<<<1, 1024, 0, stream>>>(raw_Z2, N_val);
   cudaEventRecord(ctx.carry_end[2], stream);
 
   // Step 5: R = T - Z2
   cudaEventRecord(ctx.carry_start[3], stream);
   launch_sub_kernel(raw_X, raw_T, raw_Z2, N_val, stream);
+  strict_normalize_kernel<<<1, 1024, 0, stream>>>(raw_X, N_val);
   single_block_arbitrary_conditional_sub_p_kernel<<<1, 1024, 0, stream>>>(
       raw_X, raw_P, d, N_val, false);
   cudaEventRecord(ctx.carry_end[3], stream);
@@ -717,6 +809,7 @@ auto run_fermat_pipeline(
     squarings++;
 
     if (mpz_tstbit(p_minus_1, i)) {
+      strict_normalize_kernel<<<1, 1024, 0, stream>>>(raw_X, N_val);
       single_block_arbitrary_conditional_sub_p_kernel<<<1, 1024, 0, stream>>>(
           raw_X, raw_P, d, N_val, true);
       multiplies++;
@@ -748,6 +841,7 @@ auto run_fermat_pipeline(
   float ms = 0;
   cudaEventElapsedTime(&ms, start, stop);
 
+  strict_normalize_kernel<<<1, 1024, 0, stream>>>(raw_X, N_val);
   thrust::host_vector<uint64_t> final_limbs = d_X;
   mpz_t final_val;
   mpz_init(final_val);

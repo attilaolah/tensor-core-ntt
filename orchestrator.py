@@ -352,6 +352,9 @@ def run(args):
     else:
         bases = selected
         candidates = plans.candidate_plan(bases, args.sieve_limit, args.seed)
+    if args.max_candidates is not None:
+        candidates = candidates[:args.max_candidates]
+        digest = None
     digest = digest or plans.plan_hash(bases, args.sieve_limit, args.seed, args.max_digits, candidates)
     if args.write_candidate_plan:
         digest = plans.write_plan(Path(args.write_candidate_plan), bases, args.sieve_limit, args.seed, args.max_digits, candidates)
@@ -395,6 +398,7 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--gpu-binary")
     parser.add_argument("--workers", type=int, default=1, help="positive GPU host worker/stream count")
+    parser.add_argument("--max-candidates", type=int, help="limit the ordered candidate plan")
     parser.add_argument("--candidate-plan", help="consume a persisted plan before invoking crunch --ordered")
     parser.add_argument("--write-candidate-plan", help="persist the selected bases and ordered candidates")
     args = parser.parse_args(argv)
@@ -404,6 +408,8 @@ def parse_args(argv=None):
         parser.error("--sieve-limit must be a positive integer")
     if args.workers <= 0:
         parser.error("--workers must be a positive integer")
+    if args.max_candidates is not None and args.max_candidates <= 0:
+        parser.error("--max-candidates must be a positive integer")
     if not 0 <= args.seed <= MASK64:
         parser.error("--seed must be an unsigned 64-bit integer")
     return args

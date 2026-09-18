@@ -6,8 +6,8 @@
 #include <mutex>
 #include <string>
 // test-fermat.cu
-#include <cuda_runtime.h>
 #include <cuda_profiler_api.h>
+#include <cuda_runtime.h>
 #include <gmp.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
@@ -27,7 +27,7 @@ inline std::mutex &get_print_mutex() {
 }
 
 class ProgressLogSchedule {
- public:
+public:
   ProgressLogSchedule() : start_(std::chrono::steady_clock::now()) {}
 
   auto claim_nonfinal_slot() -> bool {
@@ -45,16 +45,16 @@ class ProgressLogSchedule {
   auto claim_tick(uint64_t tick) -> bool {
     uint64_t previous_tick = last_emitted_tick_.load(std::memory_order_relaxed);
     while (previous_tick != tick) {
-      if (last_emitted_tick_.compare_exchange_weak(
-              previous_tick, tick, std::memory_order_relaxed,
-              std::memory_order_relaxed)) {
+      if (last_emitted_tick_.compare_exchange_weak(previous_tick, tick,
+                                                   std::memory_order_relaxed,
+                                                   std::memory_order_relaxed)) {
         return true;
       }
     }
     return false;
- }
+  }
 
- private:
+private:
   std::chrono::steady_clock::time_point start_;
   std::atomic<uint64_t> last_emitted_tick_{UINT64_MAX};
 };
@@ -78,19 +78,19 @@ auto format_uptime(std::chrono::seconds duration) -> std::string {
   return buffer;
 }
 
-void print_candidate_status(int thread_id, std::chrono::steady_clock::time_point
-                                               candidate_start,
-                            uint64_t q_val, size_t completed, size_t total,
-                            const std::string &result, bool terminate_line) {
+void print_candidate_status(
+    int thread_id, std::chrono::steady_clock::time_point candidate_start,
+    uint64_t q_val, size_t completed, size_t total, const std::string &result,
+    bool terminate_line) {
   const auto now = std::chrono::steady_clock::now();
   const auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
       now - get_program_start());
   const auto candidate_duration =
       std::chrono::duration_cast<std::chrono::seconds>(now - candidate_start);
-  const double completion = total == 0
-                                ? 0.0
-                                : 100.0 * static_cast<double>(completed) /
-                                      static_cast<double>(total);
+  const double completion =
+      total == 0
+          ? 0.0
+          : 100.0 * static_cast<double>(completed) / static_cast<double>(total);
 
   std::lock_guard<std::mutex> lock(get_print_mutex());
   std::cout << "[T" << std::setfill('0') << std::setw(2) << thread_id
@@ -100,8 +100,8 @@ void print_candidate_status(int thread_id, std::chrono::steady_clock::time_point
             << std::setw(5) << static_cast<unsigned long long>(total) << " | "
             << std::fixed << std::setprecision(2) << std::setw(6) << completion
             << "%] [Q " << std::setw(11) << q_val << "] " << result
-            << (terminate_line ? '\n' : '\r')
-            << std::defaultfloat << std::flush;
+            << (terminate_line ? '\n' : '\r') << std::defaultfloat
+            << std::flush;
 }
 
 inline std::atomic<size_t> &get_completed_candidate_count() {
@@ -167,8 +167,8 @@ __global__ void inverse_ntt_dit_stage(uint64_t *data,
   // Tensor-core forward stages may deliberately leave values unreduced.
   // DIT butterflies require canonical operands for their overflow-free add.
   const uint64_t x0 = data[first] % modulus_val;
-  const uint64_t x1 = static_cast<unsigned __int128>(data[second]) * twiddle %
-                      modulus_val;
+  const uint64_t x1 =
+      static_cast<unsigned __int128>(data[second]) * twiddle % modulus_val;
   data[first] = x0 >= modulus_val - x1 ? x0 - (modulus_val - x1) : x0 + x1;
   data[second] = x0 >= x1 ? x0 - x1 : x0 + modulus_val - x1;
 }
@@ -177,69 +177,92 @@ __global__ void inverse_ntt_scale(uint64_t *data, uint64_t inv_n,
                                   uint64_t modulus_val, size_t n) {
   const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index < n) {
-    data[index] = static_cast<unsigned __int128>(data[index]) * inv_n %
-                  modulus_val;
+    data[index] =
+        static_cast<unsigned __int128>(data[index]) * inv_n % modulus_val;
   }
 }
 
 __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
                                                        size_t n) {
-  __shared__ uint64_t smem[4097];
+  __shared__ uint8_t s_G[1024];
+  __shared__ uint8_t s_P[1024];
+  __shared__ uint64_t s_direct_carry[1024];
+  __shared__ uint32_t chunk_carry;
   int tid = threadIdx.x;
 
-  uint64_t carry_in = 0;
+  if (tid == 0) {
+    chunk_carry = 0;
+  }
+  __syncthreads();
 
   int num_chunks = (n + 4095) / 4096;
   for (int chunk = 0; chunk < num_chunks; chunk++) {
     int base = chunk * 4096;
+    uint64_t limbs[4];
+    uint64_t local_carry = 0;
 
     for (int i = 0; i < 4; ++i) {
-      int local_idx = tid + i * 1024;
+      int local_idx = tid * 4 + i;
       int global_idx = base + local_idx;
       if (global_idx < n) {
-        smem[local_idx] = data[global_idx];
+        uint64_t value = data[global_idx] + local_carry;
+        limbs[i] = value & 0xFFFF;
+        local_carry = value >> 16;
       } else {
-        smem[local_idx] = 0;
+        limbs[i] = 0;
+        local_carry = 0;
       }
     }
-    if (tid == 0) {
-      smem[4096] = 0;
-      smem[0] += carry_in;
-    }
+    s_direct_carry[tid] = local_carry;
     __syncthreads();
 
-    int changed = 1;
-    while (changed) {
-      changed = 0;
-      for (int i = 0; i < 4; ++i) {
-        int local_idx = tid + i * 1024;
-        if (base + local_idx >= n) {
-          continue;
-        }
+    local_carry = tid == 0 ? chunk_carry : s_direct_carry[tid - 1];
+    uint8_t P = 1;
+    for (int i = 0; i < 4; ++i) {
+      uint64_t value = limbs[i] + local_carry;
+      limbs[i] = value & 0xFFFF;
+      local_carry = value >> 16;
+      P &= limbs[i] == 0xFFFF;
+    }
+    uint8_t G = local_carry != 0;
 
-        uint64_t val = smem[local_idx];
-        uint64_t c = val >> 16;
-        if (c > 0) {
-          changed = 1;
-          atomicAdd(reinterpret_cast<unsigned long long *>(&smem[local_idx]),
-                    -static_cast<unsigned long long>(c << 16));
-          atomicAdd(
-              reinterpret_cast<unsigned long long *>(&smem[local_idx + 1]),
-              static_cast<unsigned long long>(c));
-        }
+    s_G[tid] = G;
+    s_P[tid] = P;
+    __syncthreads();
+
+#pragma unroll
+    for (int offset = 1; offset < 1024; offset *= 2) {
+      uint8_t in_G = 0, in_P = 0;
+      if (tid >= offset) {
+        in_G = s_G[tid - offset];
+        in_P = s_P[tid - offset];
       }
-      changed = __syncthreads_or(changed);
+      __syncthreads(); // Prevent Read-After-Write hazards
+      if (tid >= offset) {
+        s_G[tid] = G | (P & in_G);
+        s_P[tid] = P & in_P;
+        G = s_G[tid];
+        P = s_P[tid];
+      }
+      __syncthreads();
     }
 
-    carry_in = smem[4096];
-    __syncthreads();
+    uint64_t carry = tid == 0 ? 0 : s_G[tid - 1];
 
     for (int i = 0; i < 4; ++i) {
-      int local_idx = tid + i * 1024;
+      uint64_t value = limbs[i] + carry;
+      limbs[i] = value & 0xFFFF;
+      carry = value >> 16;
+
+      int local_idx = tid * 4 + i;
       int global_idx = base + local_idx;
       if (global_idx < n) {
-        data[global_idx] = smem[local_idx];
+        data[global_idx] = limbs[i];
       }
+    }
+
+    if (tid == 1023) {
+      chunk_carry = static_cast<uint32_t>(s_direct_carry[tid] + carry);
     }
     __syncthreads();
   }
@@ -389,10 +412,10 @@ __global__ void pointwise_multiply_kernel(uint64_t *out, const uint64_t *a,
   }
 }
 
-void launch_inverse_ntt_fermat_fused(
-    size_t N_val, uint64_t *d_data,
-    const uint64_t *inverse_powers, uint64_t inv_n, uint64_t modulus,
-    cudaStream_t stream) {
+void launch_inverse_ntt_fermat_fused(size_t N_val, uint64_t *d_data,
+                                     const uint64_t *inverse_powers,
+                                     uint64_t inv_n, uint64_t modulus,
+                                     cudaStream_t stream) {
   int threads = 256;
   int blocks = (N_val + threads - 1) / threads;
   for (size_t half = 1; half < N_val; half <<= 1) {
@@ -400,15 +423,14 @@ void launch_inverse_ntt_fermat_fused(
         d_data, inverse_powers, modulus, N_val, half);
   }
   inverse_ntt_scale<<<blocks, threads, 0, stream>>>(d_data, inv_n, modulus,
-                                                      N_val);
+                                                    N_val);
 }
 
-void launch_inverse_ntt_fermat(
-    size_t N_val, uint64_t *d_data, uint64_t inv_n, uint64_t modulus,
-    const uint64_t *inverse_powers,
-    cudaStream_t stream) {
-  launch_inverse_ntt_fermat_fused(N_val, d_data, inverse_powers, inv_n,
-                                  modulus, stream);
+void launch_inverse_ntt_fermat(size_t N_val, uint64_t *d_data, uint64_t inv_n,
+                               uint64_t modulus, const uint64_t *inverse_powers,
+                               cudaStream_t stream) {
+  launch_inverse_ntt_fermat_fused(N_val, d_data, inverse_powers, inv_n, modulus,
+                                  stream);
 }
 
 // -------------------------------------------------------------------------
@@ -620,9 +642,8 @@ auto run_fermat_pipeline(
                             stream);
   cudaEventRecord(ctx.ntt_end[0], stream);
   cudaEventRecord(ctx.pw_start[0], stream);
-  pointwise_multiply_kernel<<<blocks, threads, 0, stream>>>(raw_T, raw_T,
-                                                              raw_T, mod_val,
-                                                              N_val);
+  pointwise_multiply_kernel<<<blocks, threads, 0, stream>>>(raw_T, raw_T, raw_T,
+                                                            mod_val, N_val);
   cudaEventRecord(ctx.pw_end[0], stream);
   cudaEventRecord(ctx.ntt_start[1], stream);
   launch_inverse_ntt_fermat_fused(N_val, raw_T, raw_inverse_powers, inv_n,
@@ -714,15 +735,14 @@ auto run_fermat_pipeline(
     if (squarings % progress_poll_steps == 0 || squarings == total_steps) {
       int pct = (squarings * 100) / total_steps;
 
-       if (pct < 100 &&
-            (progress_schedule == nullptr ||
-             progress_schedule->claim_nonfinal_slot())) {
-         print_candidate_status(thread_id, candidate_start, q_val,
-                                get_completed_candidate_count().load(),
-                               candidate_total,
-                                std::string(3 - std::to_string(pct).size(), ' ') +
-                                    std::to_string(pct) + "%",
-                                false);
+      if (pct < 100 && (progress_schedule == nullptr ||
+                        progress_schedule->claim_nonfinal_slot())) {
+        print_candidate_status(
+            thread_id, candidate_start, q_val,
+            get_completed_candidate_count().load(), candidate_total,
+            std::string(3 - std::to_string(pct).size(), ' ') +
+                std::to_string(pct) + "%",
+            false);
       }
     }
   }
@@ -747,7 +767,7 @@ auto run_fermat_pipeline(
   }
   const size_t completed = get_completed_candidate_count().fetch_add(1) + 1;
   print_candidate_status(thread_id, candidate_start, q_val, completed,
-                          candidate_total, "100%", true);
+                         candidate_total, "100%", true);
   mpz_clear(final_val);
   mpz_clear(p_minus_1);
   mpz_clear(mu);
@@ -848,8 +868,8 @@ auto check_cuda_profiler(cudaError_t error, const char *operation) -> bool {
   if (error == cudaSuccess) {
     return true;
   }
-  std::cerr << "ERROR " << operation << " failed: "
-            << cudaGetErrorString(error) << '\n';
+  std::cerr << "ERROR " << operation << " failed: " << cudaGetErrorString(error)
+            << '\n';
   return false;
 }
 
@@ -883,7 +903,8 @@ auto run_ntt_differential(
         &constant_precomp) -> bool {
   std::vector<uint64_t> input(N_val);
   for (size_t index = 0; index < N_val; ++index) {
-    input[index] = (index * index * 17 + index * 13 + 5) % modulus.get_modulus();
+    input[index] =
+        (index * index * 17 + index * 13 + 5) % modulus.get_modulus();
   }
   std::vector<uint64_t> expected_forward(N_val);
   std::vector<uint64_t> expected_inverse(N_val);
@@ -912,10 +933,10 @@ auto run_ntt_differential(
       return false;
     }
   }
-  launch_inverse_ntt_fermat(
-      N_val, thrust::raw_pointer_cast(data.data()), modulus.invert(N_val),
-      modulus.get_modulus(), thrust::raw_pointer_cast(d_inverse_powers.data()),
-      nullptr);
+  launch_inverse_ntt_fermat(N_val, thrust::raw_pointer_cast(data.data()),
+                            modulus.invert(N_val), modulus.get_modulus(),
+                            thrust::raw_pointer_cast(d_inverse_powers.data()),
+                            nullptr);
   cudaDeviceSynchronize();
   thrust::host_vector<uint64_t> inverse = data;
   for (size_t index = 0; index < N_val; ++index) {
@@ -1058,7 +1079,7 @@ auto main(int argc, char **argv) -> int {
       return 1;
     }
     const std::vector<uint64_t> candidates = {3, 17, 65537, 41559263,
-                                               9, 15, 21, 25};
+                                              9, 15, 21,    25};
     for (const uint64_t candidate_value : candidates) {
       mpz_set_ui(p, candidate_value);
       mpz_t oracle;
@@ -1081,14 +1102,14 @@ auto main(int argc, char **argv) -> int {
           context, {}, {}, 0, candidate_value, candidates.size());
       if (actual != expected_fermat) {
         std::cerr << "GPU Fermat mismatch p=" << candidate_value
-                  << " expected=" << expected_fermat
-                  << " actual=" << actual << '\n';
+                  << " expected=" << expected_fermat << " actual=" << actual
+                  << '\n';
         mpz_clear(p);
         return 1;
       }
       std::cout << "GPU Fermat PASS p=" << candidate_value
-                << " expected=" << expected_fermat
-                << " actual=" << actual << '\n';
+                << " expected=" << expected_fermat << " actual=" << actual
+                << '\n';
     }
     mpz_clear(p);
     return 0;
@@ -1176,65 +1197,67 @@ auto main(int argc, char **argv) -> int {
           return 2;
         }
         ordered_candidates.push_back(q);
-       }
-       std::atomic<size_t> next_index{0};
-       bool profile_candidate_reached = false;
-       ProgressLogSchedule ordered_progress_schedule;
-       auto ordered_worker = [&](size_t worker_id) -> bool {
-         StreamContext context;
-         try {
-           while (true) {
-           const size_t index = next_index.fetch_add(1);
-           if (index >= ordered_candidates.size()) {
-             return true;
-           }
-          const uint64_t q = ordered_candidates[index];
-          {
-            std::lock_guard<std::mutex> lock(get_print_mutex());
-            std::cout << "TEST index=" << index << " q=" << q << '\n'
-                      << std::flush;
-          }
-          Candidate candidate;
-          candidate.q_val = q;
-          mpz_mul_ui(candidate.p, K, q);
-          mpz_add_ui(candidate.p, candidate.p, 1);
-          candidate.bit_len = mpz_sizeinbase(candidate.p, 2);
-          candidate.d = (candidate.bit_len + 15) / 16;
-          candidate.N_val = candidate.bit_len <= 32000 ? 4096 : 65536;
-           const bool profile_this_candidate =
-               profile_candidate_requested && index == profile_candidate_index;
-           if (profile_this_candidate) {
-             profile_candidate_reached = true;
-             if (!check_cuda_profiler(cudaProfilerStart(), "cudaProfilerStart")) {
-               return false;
-             }
-           }
+      }
+      std::atomic<size_t> next_index{0};
+      bool profile_candidate_reached = false;
+      ProgressLogSchedule ordered_progress_schedule;
+      auto ordered_worker = [&](size_t worker_id) -> bool {
+        StreamContext context;
+        try {
+          while (true) {
+            const size_t index = next_index.fetch_add(1);
+            if (index >= ordered_candidates.size()) {
+              return true;
+            }
+            const uint64_t q = ordered_candidates[index];
+            {
+              std::lock_guard<std::mutex> lock(get_print_mutex());
+              std::cout << "TEST index=" << index << " q=" << q << '\n'
+                        << std::flush;
+            }
+            Candidate candidate;
+            candidate.q_val = q;
+            mpz_mul_ui(candidate.p, K, q);
+            mpz_add_ui(candidate.p, candidate.p, 1);
+            candidate.bit_len = mpz_sizeinbase(candidate.p, 2);
+            candidate.d = (candidate.bit_len + 15) / 16;
+            candidate.N_val = candidate.bit_len <= 32000 ? 4096 : 65536;
+            const bool profile_this_candidate =
+                profile_candidate_requested && index == profile_candidate_index;
+            if (profile_this_candidate) {
+              profile_candidate_reached = true;
+              if (!check_cuda_profiler(cudaProfilerStart(),
+                                       "cudaProfilerStart")) {
+                return false;
+              }
+            }
 
-           bool passed;
-           try {
-             passed = run_fermat_pipeline(
-                 candidate.p, candidate.bit_len, candidate.d, candidate.N_val,
-                 modulus.invert(candidate.N_val), modulus,
-                 thrust::raw_pointer_cast(precomp_device.get()), constant_precomp,
-                 context, candidate.h_P, candidate.h_mu,
-                 static_cast<int>(worker_id), q, ordered_candidates.size(),
-                 &ordered_progress_schedule);
+            bool passed;
+            try {
+              passed = run_fermat_pipeline(
+                  candidate.p, candidate.bit_len, candidate.d, candidate.N_val,
+                  modulus.invert(candidate.N_val), modulus,
+                  thrust::raw_pointer_cast(precomp_device.get()),
+                  constant_precomp, context, candidate.h_P, candidate.h_mu,
+                  static_cast<int>(worker_id), q, ordered_candidates.size(),
+                  &ordered_progress_schedule);
             } catch (...) {
               if (profile_this_candidate) {
                 check_cuda_profiler(cudaProfilerStop(), "cudaProfilerStop");
               }
               throw;
             }
-           if (profile_this_candidate &&
-               !check_cuda_profiler(cudaProfilerStop(), "cudaProfilerStop")) {
-             return false;
-           }
-           if (passed) {
-            char *p_string = mpz_get_str(nullptr, 10, candidate.p);
-            std::lock_guard<std::mutex> lock(get_print_mutex());
-             std::cout << "FOUND index=" << index << " q=" << q
-                       << " p=" << p_string << '\n' << std::flush;
-             free(p_string);
+            if (profile_this_candidate &&
+                !check_cuda_profiler(cudaProfilerStop(), "cudaProfilerStop")) {
+              return false;
+            }
+            if (passed) {
+              char *p_string = mpz_get_str(nullptr, 10, candidate.p);
+              std::lock_guard<std::mutex> lock(get_print_mutex());
+              std::cout << "FOUND index=" << index << " q=" << q
+                        << " p=" << p_string << '\n'
+                        << std::flush;
+              free(p_string);
             }
             if (profile_this_candidate) {
               return true;
@@ -1250,34 +1273,35 @@ auto main(int argc, char **argv) -> int {
           std::cerr << "ERROR ordered candidate execution failed\n";
           return false;
         }
-       };
-       std::atomic<bool> ordered_run_ok{true};
-       if (workers == 1) {
-         ordered_run_ok.store(ordered_worker(0));
-       } else {
+      };
+      std::atomic<bool> ordered_run_ok{true};
+      if (workers == 1) {
+        ordered_run_ok.store(ordered_worker(0));
+      } else {
         std::vector<std::thread> ordered_threads;
         ordered_threads.reserve(workers);
         for (size_t worker_id = 0; worker_id < workers; ++worker_id) {
-           ordered_threads.emplace_back([&, worker_id] {
-             if (!ordered_worker(worker_id)) {
-               ordered_run_ok.store(false);
-             }
-           });
+          ordered_threads.emplace_back([&, worker_id] {
+            if (!ordered_worker(worker_id)) {
+              ordered_run_ok.store(false);
+            }
+          });
         }
         for (auto &thread : ordered_threads) {
           thread.join();
-         }
-       }
-       if (!ordered_run_ok.load()) {
-         mpz_clear(K);
-         return 1;
-       }
-       if (profile_candidate_requested && !profile_candidate_reached) {
-         std::cerr << "ERROR requested profile candidate index was not reached\n";
-         mpz_clear(K);
-         return 1;
-       }
-       mpz_clear(K);
+        }
+      }
+      if (!ordered_run_ok.load()) {
+        mpz_clear(K);
+        return 1;
+      }
+      if (profile_candidate_requested && !profile_candidate_reached) {
+        std::cerr
+            << "ERROR requested profile candidate index was not reached\n";
+        mpz_clear(K);
+        return 1;
+      }
+      mpz_clear(K);
       std::lock_guard<std::mutex> lock(get_print_mutex());
       std::cout << "DONE\n" << std::flush;
       return 0;
@@ -1438,8 +1462,13 @@ auto main(int argc, char **argv) -> int {
 
     StreamContext ctx;
     std::vector<uint64_t> empty_vec;
-    run_fermat_pipeline(p, bit_len, d, N_val, inv_n, modulus,
-                        thrust::raw_pointer_cast(precomp_device.get()),
-                        constant_precomp, ctx, empty_vec, empty_vec, 0, 0, 1);
+    const bool passed = run_fermat_pipeline(
+        p, bit_len, d, N_val, inv_n, modulus,
+        thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, ctx,
+        empty_vec, empty_vec, 0, 0, 1);
+    std::cout << "FERMAT " << (passed ? "PASS" : "FAIL") << '\n';
+    if (!passed) {
+      return 1;
+    }
   }
 }

@@ -13,15 +13,17 @@
   }:
     flake-utils.lib.eachDefaultSystem (
       system: let
+        inherit (pkgs.cudaPackages_13_4) cudatoolkit;
+
         pkgs = import nixpkgs {
           inherit system;
           config.allowUnfree = true;
         };
         exports = ''
-          export CPATH=${pkgs.cudaPackages_13_4.cudatoolkit}/include:$CPATH
-          export CUDA_PATH=${pkgs.cudaPackages_13_4.cudatoolkit}
-          export LD_LIBRARY_PATH=${pkgs.cudaPackages_13_4.cudatoolkit}/lib:/run/opengl-driver/lib:$LD_LIBRARY_PATH
-          export LIBRARY_PATH=${pkgs.cudaPackages_13_4.cudatoolkit}/lib:$LIBRARY_PATH
+          export CPATH=${cudatoolkit}/include:$CPATH
+          export CUDA_PATH=${cudatoolkit}
+          export LD_LIBRARY_PATH=${cudatoolkit}/lib:/run/opengl-driver/lib:$LD_LIBRARY_PATH
+          export LIBRARY_PATH=${cudatoolkit}/lib:$LIBRARY_PATH
         '';
       in {
         formatter = pkgs.alejandra;
@@ -33,7 +35,7 @@
 
           buildInputs = with pkgs; [
             boost
-            cudaPackages_13_4.cudatoolkit
+            cudatoolkit
             gmp
           ];
 
@@ -52,7 +54,7 @@
 
           postFixup = ''
             wrapProgram $out/bin/crunch_sm_86 \
-              --prefix LD_LIBRARY_PATH : /run/opengl-driver/lib:${pkgs.cudaPackages_13_4.cudatoolkit}/lib
+              --prefix LD_LIBRARY_PATH : /run/opengl-driver/lib:${cudatoolkit}/lib
           '';
 
           meta = with pkgs.lib; {
@@ -65,7 +67,7 @@
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             boost
-            cudaPackages_13_4.cudatoolkit
+            cudatoolkit
             cudaPackages.nsight_compute
             cudaPackages.nsight_systems
             gmp

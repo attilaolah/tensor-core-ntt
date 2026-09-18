@@ -182,13 +182,15 @@ __global__ void inverse_ntt_scale(uint64_t *data, uint64_t inv_n,
   }
 }
 
-__global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
-                                                       size_t n) {
+__global__ void single_block_arbitrary_sub_kernel(uint64_t *r,
+                                                  const uint64_t *t,
+                                                  const uint64_t *z2,
+                                                  size_t n) {
+  __shared__ uint64_t s_r[4097];
+  __shared__ uint64_t s_direct_carry[1024];
   __shared__ uint32_t s_warp_G[32];
   __shared__ uint32_t s_warp_P[32];
-  __shared__ uint64_t s_direct_carry[1024];
   __shared__ uint32_t chunk_carry;
-  __shared__ uint32_t next_chunk_carry_in;
   int tid = threadIdx.x;
 
   if (tid == 0) {
@@ -196,143 +198,31 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
   }
   __syncthreads();
 
-  int num_chunks = (n + 4095) / 4096;
-  for (int chunk = 0; chunk < num_chunks; chunk++) {
-    int base = chunk * 4096;
-    uint64_t limbs[4];
-    uint64_t local_carry = 0;
-
-    for (int i = 0; i < 4; ++i) {
-      int local_idx = tid * 4 + i;
-      int global_idx = base + local_idx;
-      if (global_idx < n) {
-        uint64_t value = data[global_idx] + local_carry;
-        limbs[i] = value & 0xFFFF;
-        local_carry = value >> 16;
-      } else {
-        limbs[i] = 0;
-        local_carry = 0;
-      }
-    }
-    s_direct_carry[tid] = local_carry;
-    __syncthreads();
-
-    local_carry = tid == 0 ? chunk_carry : s_direct_carry[tid - 1];
-    uint32_t block_propagates = 1;
-    for (int i = 0; i < 4; ++i) {
-      uint64_t value = limbs[i] + local_carry;
-      limbs[i] = value & 0xFFFF;
-      local_carry = value >> 16;
-      block_propagates &= limbs[i] == 0xFFFF;
-    }
-
-    uint32_t val =
-        (local_carry != 0 ? 0x10000U : 0U) | (block_propagates ? 0xFFFFU : 0U);
-    uint32_t chunk_carry_in = 0;
-    int lane = threadIdx.x & 31;
-    int warpId = threadIdx.x >> 5;
-
-    // Stage 1: Initial State
-    uint32_t G = (val >= 0x10000) ? 1 : 0;
-    uint32_t P = ((val & 0xFFFF) == 0xFFFF) ? 1 : 0;
-
-    // Stage 2: Warp-Level Inclusive Scan (Registers Only)
-#pragma unroll
-    for (int offset = 1; offset < 32; offset *= 2) {
-      uint32_t in_G = __shfl_up_sync(0xFFFFFFFF, G, offset);
-      uint32_t in_P = __shfl_up_sync(0xFFFFFFFF, P, offset);
-      if (lane >= offset) {
-        G = G | (P & in_G);
-        P = P & in_P;
-      }
-    }
-
-    // Stage 3: Cross-Warp Scan (Shared Memory)
-    if (lane == 31) {
-      s_warp_G[warpId] = G;
-      s_warp_P[warpId] = P;
-    }
-    __syncthreads();
-
-    if (warpId == 0) {
-      uint32_t wG = s_warp_G[lane];
-      uint32_t wP = s_warp_P[lane];
-#pragma unroll
-      for (int offset = 1; offset < 32; offset *= 2) {
-        uint32_t in_G = __shfl_up_sync(0xFFFFFFFF, wG, offset);
-        uint32_t in_P = __shfl_up_sync(0xFFFFFFFF, wP, offset);
-        if (lane >= offset) {
-          wG = wG | (wP & in_G);
-          wP = wP & in_P;
-        }
-      }
-      s_warp_G[lane] = wG;
-      s_warp_P[lane] = wP;
-    }
-    __syncthreads();
-
-    // Stage 4: Apply Carries & Handle Chunk Boundary
-    uint32_t carry_into_warp =
-        (warpId > 0) ? s_warp_G[warpId - 1] : chunk_carry_in;
-    uint32_t carry_into_thread = carry_into_warp;
-
-    uint32_t G_prev = __shfl_up_sync(0xFFFFFFFF, G, 1);
-    uint32_t P_prev = __shfl_up_sync(0xFFFFFFFF, P, 1);
-    if (lane > 0) {
-      carry_into_thread = G_prev | (P_prev & carry_into_warp);
-    }
-
-    val = (val & 0xFFFF) + carry_into_thread;
-
-    if (threadIdx.x == 1023) {
-      next_chunk_carry_in = val >> 16;
-    }
-
-    uint64_t carry = val >> 16;
-
-    for (int i = 0; i < 4; ++i) {
-      uint64_t value = limbs[i] + carry;
-      limbs[i] = value & 0xFFFF;
-      carry = value >> 16;
-
-      int local_idx = tid * 4 + i;
-      int global_idx = base + local_idx;
-      if (global_idx < n) {
-        data[global_idx] = limbs[i];
-      }
-    }
-
-    if (tid == 1023) {
-      chunk_carry =
-          static_cast<uint32_t>(s_direct_carry[tid] + next_chunk_carry_in);
-    }
-    __syncthreads();
-  }
-}
-
-void launch_resolve_carries(uint64_t *d_data, size_t n, cudaStream_t stream) {
-  single_block_arbitrary_resolve_carries<<<1, 1024, 0, stream>>>(d_data, n);
-}
-
-__global__ void single_block_arbitrary_sub_kernel(uint64_t *r,
-                                                  const uint64_t *t,
-                                                  const uint64_t *z2,
-                                                  size_t n) {
-  __shared__ uint64_t s_r[4097];
-  int tid = threadIdx.x;
-
   int64_t borrow_in = 0;
 
   int num_chunks = (n + 4095) / 4096;
   for (int chunk = 0; chunk < num_chunks; chunk++) {
     int base = chunk * 4096;
+    uint64_t limbs[4];
+
+    for (int i = 0; i < 4; ++i) {
+      int local_idx = tid * 4 + i;
+      int global_idx = base + local_idx;
+      limbs[i] = global_idx < n ? z2[global_idx] : 0;
+    }
+    device_warp_normalize(limbs, s_direct_carry, s_warp_G, s_warp_P,
+                          chunk_carry);
+    for (int i = 0; i < 4; ++i) {
+      s_r[tid * 4 + i] = limbs[i];
+    }
+    __syncthreads();
 
     for (int i = 0; i < 4; ++i) {
       int local_idx = tid + i * 1024;
       int global_idx = base + local_idx;
       if (global_idx < n) {
         int64_t diff = static_cast<int64_t>(t[global_idx]) -
-                       static_cast<int64_t>(z2[global_idx]);
+                       static_cast<int64_t>(s_r[local_idx]);
         s_r[local_idx] = static_cast<uint64_t>(diff);
       } else {
         s_r[local_idx] = 0;
@@ -692,12 +582,10 @@ auto run_fermat_pipeline(
                                   mod_val, stream);
   cudaEventRecord(ctx.ntt_end[1], stream);
   cudaEventRecord(ctx.carry_start[0], stream);
-  launch_resolve_carries(raw_T, N_val, stream);
+  // Step 2: normalize T and compute Q = floor(T / B^(d-1)) * mu.
+  normalize_and_shift_right_kernel<<<1, 1024, 0, stream>>>(raw_Z1, raw_T, d - 1,
+                                                           N_val, true);
   cudaEventRecord(ctx.carry_end[0], stream);
-
-  // Step 2: Q = floor(T / B^(d-1)) * mu
-  shift_right_kernel<<<blocks, threads, 0, stream>>>(raw_Z1, raw_T, d - 1,
-                                                     N_val);
   cudaEventRecord(ctx.ntt_start[2], stream);
   launch_forward_ntt_fermat(N_val, raw_Z1, precomp_device_ptr, constant_precomp,
                             stream);
@@ -711,12 +599,10 @@ auto run_fermat_pipeline(
                                   mod_val, stream);
   cudaEventRecord(ctx.ntt_end[3], stream);
   cudaEventRecord(ctx.carry_start[1], stream);
-  launch_resolve_carries(raw_Z1, N_val, stream);
+  // Step 3: normalize Q * mu and divide by B^(d+1).
+  normalize_and_shift_right_kernel<<<1, 1024, 0, stream>>>(raw_Q, raw_Z1, d + 1,
+                                                           N_val, false);
   cudaEventRecord(ctx.carry_end[1], stream);
-
-  // Step 3: Q = Q / B^(d+1)
-  shift_right_kernel<<<blocks, threads, 0, stream>>>(raw_Q, raw_Z1, d + 1,
-                                                     N_val);
 
   // Step 4: Z2 = Q * P
   cudaMemcpyAsync(raw_Z2, raw_Q, N_val * sizeof(uint64_t),
@@ -734,12 +620,10 @@ auto run_fermat_pipeline(
                                   mod_val, stream);
   cudaEventRecord(ctx.ntt_end[5], stream);
   cudaEventRecord(ctx.carry_start[2], stream);
-  launch_resolve_carries(raw_Z2, N_val, stream);
-  cudaEventRecord(ctx.carry_end[2], stream);
-
-  // Step 5: R = T - Z2
-  cudaEventRecord(ctx.carry_start[3], stream);
+  // Step 5: normalize Z2 and compute R = T - Z2.
   launch_sub_kernel(raw_X, raw_T, raw_Z2, N_val, stream);
+  cudaEventRecord(ctx.carry_end[2], stream);
+  cudaEventRecord(ctx.carry_start[3], stream);
   single_block_arbitrary_conditional_sub_p_kernel<<<1, 1024, 0, stream>>>(
       raw_X, raw_P, d, N_val, false);
   cudaEventRecord(ctx.carry_end[3], stream);

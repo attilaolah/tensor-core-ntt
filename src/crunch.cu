@@ -201,7 +201,9 @@ __global__ void delayed_carry_kernel(uint64_t *data, size_t n) {
 
         for (int i = 0; i < 4; ++i) {
             int local_idx = tid + i * 1024;
-            if (base + local_idx < n) smem[local_idx] = data[base + local_idx];
+            if (base + local_idx < n) {
+                smem[local_idx] = data[base + local_idx];
+            }
         }
         __syncthreads();
 
@@ -251,28 +253,30 @@ __global__ void delayed_carry_kernel(uint64_t *data, size_t n) {
 }
 
 struct CarryTransform {
-  // A delayed limb is below 4 * 2^16, so both its input and output carry are
-  // in [0, 3].  Store the output for all four possible inputs as 2-bit fields.
-  __device__ static auto identity() -> uint64_t {
-    return UINT64_C(0xe4);  // 0 -> 0, 1 -> 1, 2 -> 2, 3 -> 3
+  // Bit 0 is Generate; bit 1 stores !Propagate so zero is the identity.
+  __device__ static auto pack(bool generate, bool propagate) -> uint64_t {
+    return static_cast<uint64_t>(generate) |
+           (static_cast<uint64_t>(!propagate) << 1);
   }
 
-  __device__ static auto apply(uint64_t transform, uint64_t carry) -> uint64_t {
-    return (transform >> (2 * carry)) & 3;
+  __device__ static auto generate(uint64_t state) -> bool {
+    return (state & 1) != 0;
+  }
+
+  __device__ static auto propagate(uint64_t state) -> bool {
+    return (state & 2) == 0;
   }
 
   __device__ auto operator()(uint64_t lhs, uint64_t rhs) const -> uint64_t {
-    uint64_t composed = 0;
-    for (uint64_t carry = 0; carry < 4; ++carry) {
-      composed |= apply(rhs, apply(lhs, carry)) << (2 * carry);
-    }
-    return composed;
+    return pack(generate(rhs) || (propagate(rhs) && generate(lhs)),
+                propagate(rhs) && propagate(lhs));
   }
 };
 
 __global__ void strict_normalize_kernel(uint64_t *data, size_t n) {
   __shared__ uint64_t smem[4097];
-  using BlockScan = cub::BlockScan<uint64_t, 1024>;
+  __shared__ uint64_t raw_carry, next_raw_carry, binary_carry;
+  using BlockScan = cub::BlockScan<uint64_t, 1024, cub::BLOCK_SCAN_WARP_SCANS>;
   __shared__ typename BlockScan::TempStorage scan_storage;
   int tid = threadIdx.x;
 
@@ -291,29 +295,30 @@ __global__ void strict_normalize_kernel(uint64_t *data, size_t n) {
         smem[local_idx] = 0;
       }
     }
-    if (tid == 0) smem[4096] = carry_in;
+    if (tid == 0) {
+      raw_carry = carry_in;
+      binary_carry = 0;
+    }
     __syncthreads();
 
     for (int segment = 0; segment < 4; ++segment) {
       const int local_idx = segment * 1024 + tid;
       const size_t global_idx = static_cast<size_t>(base) + local_idx;
       const bool valid = global_idx < n;
-      const uint64_t value = valid ? smem[local_idx] : 0;
-      uint64_t transform = CarryTransform::identity();
-      if (valid) {
-        transform = 0;
-        for (uint64_t carry = 0; carry < 4; ++carry) {
-          transform |= ((value + carry) >> 16) << (2 * carry);
-        }
-      }
+      const uint64_t raw_value = valid ? smem[local_idx] : 0;
+      const uint64_t prior_raw_carry =
+          tid == 0 ? raw_carry : smem[local_idx - 1] >> 16;
+      uint64_t value = (raw_value & 0xFFFF) + prior_raw_carry;
+      if (tid == 0) value += binary_carry;
+      const uint64_t transform =
+          valid ? CarryTransform::pack(value >= 0x10000, value == 0xFFFF)
+                : CarryTransform::pack(false, true);
 
       uint64_t prefix;
       BlockScan(scan_storage).ExclusiveScan(transform, prefix,
-                                             CarryTransform::identity(),
                                              CarryTransform());
       if (valid) {
-        const uint64_t input_carry = CarryTransform::apply(prefix, carry_in);
-        smem[local_idx] = (value + input_carry) & 0xFFFF;
+        smem[local_idx] = (value + CarryTransform::generate(prefix)) & 0xFFFF;
       }
 
       const size_t segment_start = static_cast<size_t>(base) + segment * 1024;
@@ -321,12 +326,16 @@ __global__ void strict_normalize_kernel(uint64_t *data, size_t n) {
           segment_start < n ? min(static_cast<size_t>(1024), n - segment_start)
                             : 0;
       if (tid == static_cast<int>(segment_length) - 1) {
-        const uint64_t all_lanes = CarryTransform()(prefix, transform);
-        smem[4096] = CarryTransform::apply(all_lanes, carry_in);
+        next_raw_carry = raw_value >> 16;
+        binary_carry = CarryTransform::generate(
+            CarryTransform()(prefix, transform));
       }
       __syncthreads();
-      carry_in = smem[4096];
+      if (tid == 0) raw_carry = next_raw_carry;
+      __syncthreads();
     }
+
+    carry_in = raw_carry + binary_carry;
 
     __syncthreads();
 
@@ -769,6 +778,7 @@ auto run_fermat_pipeline(
   // Step 5: R = T - Z2
   cudaEventRecord(ctx.carry_start[3], stream);
   launch_sub_kernel(raw_X, raw_T, raw_Z2, N_val, stream);
+  strict_normalize_kernel<<<1, 1024, 0, stream>>>(raw_X, N_val);
   single_block_arbitrary_conditional_sub_p_kernel<<<1, 1024, 0, stream>>>(
       raw_X, raw_P, d, N_val, false);
   cudaEventRecord(ctx.carry_end[3], stream);
@@ -794,6 +804,7 @@ auto run_fermat_pipeline(
     squarings++;
 
     if (mpz_tstbit(p_minus_1, i)) {
+      strict_normalize_kernel<<<1, 1024, 0, stream>>>(raw_X, N_val);
       single_block_arbitrary_conditional_sub_p_kernel<<<1, 1024, 0, stream>>>(
           raw_X, raw_P, d, N_val, true);
       multiplies++;
@@ -825,6 +836,7 @@ auto run_fermat_pipeline(
   float ms = 0;
   cudaEventElapsedTime(&ms, start, stop);
 
+  strict_normalize_kernel<<<1, 1024, 0, stream>>>(raw_X, N_val);
   thrust::host_vector<uint64_t> final_limbs = d_X;
   mpz_t final_val;
   mpz_init(final_val);

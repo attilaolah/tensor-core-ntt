@@ -184,10 +184,11 @@ __global__ void inverse_ntt_scale(uint64_t *data, uint64_t inv_n,
 
 __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
                                                        size_t n) {
-  __shared__ uint8_t s_G[1024];
-  __shared__ uint8_t s_P[1024];
+  __shared__ uint32_t s_warp_G[32];
+  __shared__ uint32_t s_warp_P[32];
   __shared__ uint64_t s_direct_carry[1024];
   __shared__ uint32_t chunk_carry;
+  __shared__ uint32_t next_chunk_carry_in;
   int tid = threadIdx.x;
 
   if (tid == 0) {
@@ -217,37 +218,77 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
     __syncthreads();
 
     local_carry = tid == 0 ? chunk_carry : s_direct_carry[tid - 1];
-    uint8_t P = 1;
+    uint32_t block_propagates = 1;
     for (int i = 0; i < 4; ++i) {
       uint64_t value = limbs[i] + local_carry;
       limbs[i] = value & 0xFFFF;
       local_carry = value >> 16;
-      P &= limbs[i] == 0xFFFF;
+      block_propagates &= limbs[i] == 0xFFFF;
     }
-    uint8_t G = local_carry != 0;
 
-    s_G[tid] = G;
-    s_P[tid] = P;
+    uint32_t val =
+        (local_carry != 0 ? 0x10000U : 0U) | (block_propagates ? 0xFFFFU : 0U);
+    uint32_t chunk_carry_in = 0;
+    int lane = threadIdx.x & 31;
+    int warpId = threadIdx.x >> 5;
+
+    // Stage 1: Initial State
+    uint32_t G = (val >= 0x10000) ? 1 : 0;
+    uint32_t P = ((val & 0xFFFF) == 0xFFFF) ? 1 : 0;
+
+    // Stage 2: Warp-Level Inclusive Scan (Registers Only)
+#pragma unroll
+    for (int offset = 1; offset < 32; offset *= 2) {
+      uint32_t in_G = __shfl_up_sync(0xFFFFFFFF, G, offset);
+      uint32_t in_P = __shfl_up_sync(0xFFFFFFFF, P, offset);
+      if (lane >= offset) {
+        G = G | (P & in_G);
+        P = P & in_P;
+      }
+    }
+
+    // Stage 3: Cross-Warp Scan (Shared Memory)
+    if (lane == 31) {
+      s_warp_G[warpId] = G;
+      s_warp_P[warpId] = P;
+    }
     __syncthreads();
 
+    if (warpId == 0) {
+      uint32_t wG = s_warp_G[lane];
+      uint32_t wP = s_warp_P[lane];
 #pragma unroll
-    for (int offset = 1; offset < 1024; offset *= 2) {
-      uint8_t in_G = 0, in_P = 0;
-      if (tid >= offset) {
-        in_G = s_G[tid - offset];
-        in_P = s_P[tid - offset];
+      for (int offset = 1; offset < 32; offset *= 2) {
+        uint32_t in_G = __shfl_up_sync(0xFFFFFFFF, wG, offset);
+        uint32_t in_P = __shfl_up_sync(0xFFFFFFFF, wP, offset);
+        if (lane >= offset) {
+          wG = wG | (wP & in_G);
+          wP = wP & in_P;
+        }
       }
-      __syncthreads(); // Prevent Read-After-Write hazards
-      if (tid >= offset) {
-        s_G[tid] = G | (P & in_G);
-        s_P[tid] = P & in_P;
-        G = s_G[tid];
-        P = s_P[tid];
-      }
-      __syncthreads();
+      s_warp_G[lane] = wG;
+      s_warp_P[lane] = wP;
+    }
+    __syncthreads();
+
+    // Stage 4: Apply Carries & Handle Chunk Boundary
+    uint32_t carry_into_warp =
+        (warpId > 0) ? s_warp_G[warpId - 1] : chunk_carry_in;
+    uint32_t carry_into_thread = carry_into_warp;
+
+    uint32_t G_prev = __shfl_up_sync(0xFFFFFFFF, G, 1);
+    uint32_t P_prev = __shfl_up_sync(0xFFFFFFFF, P, 1);
+    if (lane > 0) {
+      carry_into_thread = G_prev | (P_prev & carry_into_warp);
     }
 
-    uint64_t carry = tid == 0 ? 0 : s_G[tid - 1];
+    val = (val & 0xFFFF) + carry_into_thread;
+
+    if (threadIdx.x == 1023) {
+      next_chunk_carry_in = val >> 16;
+    }
+
+    uint64_t carry = val >> 16;
 
     for (int i = 0; i < 4; ++i) {
       uint64_t value = limbs[i] + carry;
@@ -262,7 +303,8 @@ __global__ void single_block_arbitrary_resolve_carries(uint64_t *data,
     }
 
     if (tid == 1023) {
-      chunk_carry = static_cast<uint32_t>(s_direct_carry[tid] + carry);
+      chunk_carry =
+          static_cast<uint32_t>(s_direct_carry[tid] + next_chunk_carry_in);
     }
     __syncthreads();
   }

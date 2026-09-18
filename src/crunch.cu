@@ -251,25 +251,22 @@ __global__ void delayed_carry_kernel(uint64_t *data, size_t n) {
 }
 
 struct CarryTransform {
-  // The packed P bit is inverted so the all-zero value is the identity
-  // transform (G=0, P=1) required by CUB's exclusive scan.
-  __device__ static auto pack(bool generate, bool propagate) -> uint64_t {
-    return static_cast<uint64_t>(generate) |
-           (static_cast<uint64_t>(!propagate) << 1);
+  // A delayed limb is below 4 * 2^16, so both its input and output carry are
+  // in [0, 3].  Store the output for all four possible inputs as 2-bit fields.
+  __device__ static auto identity() -> uint64_t {
+    return UINT64_C(0xe4);  // 0 -> 0, 1 -> 1, 2 -> 2, 3 -> 3
   }
 
-  __device__ static auto generate(uint64_t state) -> bool {
-    return (state & 1) != 0;
+  __device__ static auto apply(uint64_t transform, uint64_t carry) -> uint64_t {
+    return (transform >> (2 * carry)) & 3;
   }
 
-  __device__ static auto propagate(uint64_t state) -> bool {
-    return (state & 2) == 0;
-  }
-
-  // rhs composes after lhs: G = Gr || (Pr && Gl), P = Pr && Pl.
   __device__ auto operator()(uint64_t lhs, uint64_t rhs) const -> uint64_t {
-    return pack(generate(rhs) || (propagate(rhs) && generate(lhs)),
-                propagate(rhs) && propagate(lhs));
+    uint64_t composed = 0;
+    for (uint64_t carry = 0; carry < 4; ++carry) {
+      composed |= apply(rhs, apply(lhs, carry)) << (2 * carry);
+    }
+    return composed;
   }
 };
 
@@ -297,36 +294,26 @@ __global__ void strict_normalize_kernel(uint64_t *data, size_t n) {
     if (tid == 0) smem[4096] = carry_in;
     __syncthreads();
 
-    // Scan each contiguous 1024-limb segment collectively.  scan_storage is
-    // separate from smem so this remains valid for zero-dynamic-shared-memory
-    // launches.
     for (int segment = 0; segment < 4; ++segment) {
       const int local_idx = segment * 1024 + tid;
-      const int global_idx = base + local_idx;
+      const size_t global_idx = static_cast<size_t>(base) + local_idx;
       const bool valid = global_idx < n;
-      constexpr uint64_t radix = UINT64_C(1) << 16;
       const uint64_t value = valid ? smem[local_idx] : 0;
-      const uint64_t remainder = value & 0xFFFF;
-      const uint64_t prior_generate =
-          tid > 0 && valid ? smem[local_idx - 1] >> 16 : 0;
-      const uint64_t base_value = remainder + prior_generate;
-      const uint64_t first_carry = (remainder + carry_in) >> 16;
-      const uint64_t transform =
-          !valid ? CarryTransform::pack(false, true)
-                 : tid == 0 ? CarryTransform::pack(first_carry != 0, false)
-                            : CarryTransform::pack(base_value >= radix,
-                                                   base_value == radix - 1);
-      uint64_t prefix;
-
-      // Every lane participates; invalid lanes contribute the identity.
-      BlockScan(scan_storage).ExclusiveScan(transform, prefix,
-                                             CarryTransform());
-
-      const uint64_t previous_carry = CarryTransform::generate(prefix);
+      uint64_t transform = CarryTransform::identity();
       if (valid) {
-        const uint64_t digit_value = tid == 0 ? remainder + carry_in
-                                               : base_value + previous_carry;
-        smem[local_idx] = digit_value & 0xFFFF;
+        transform = 0;
+        for (uint64_t carry = 0; carry < 4; ++carry) {
+          transform |= ((value + carry) >> 16) << (2 * carry);
+        }
+      }
+
+      uint64_t prefix;
+      BlockScan(scan_storage).ExclusiveScan(transform, prefix,
+                                             CarryTransform::identity(),
+                                             CarryTransform());
+      if (valid) {
+        const uint64_t input_carry = CarryTransform::apply(prefix, carry_in);
+        smem[local_idx] = (value + input_carry) & 0xFFFF;
       }
 
       const size_t segment_start = static_cast<size_t>(base) + segment * 1024;
@@ -334,9 +321,8 @@ __global__ void strict_normalize_kernel(uint64_t *data, size_t n) {
           segment_start < n ? min(static_cast<size_t>(1024), n - segment_start)
                             : 0;
       if (tid == static_cast<int>(segment_length) - 1) {
-        const uint64_t final_carry =
-            CarryTransform::generate(CarryTransform()(prefix, transform));
-        smem[4096] = (value >> 16) + final_carry;
+        const uint64_t all_lanes = CarryTransform()(prefix, transform);
+        smem[4096] = CarryTransform::apply(all_lanes, carry_in);
       }
       __syncthreads();
       carry_in = smem[4096];
@@ -783,7 +769,6 @@ auto run_fermat_pipeline(
   // Step 5: R = T - Z2
   cudaEventRecord(ctx.carry_start[3], stream);
   launch_sub_kernel(raw_X, raw_T, raw_Z2, N_val, stream);
-  strict_normalize_kernel<<<1, 1024, 0, stream>>>(raw_X, N_val);
   single_block_arbitrary_conditional_sub_p_kernel<<<1, 1024, 0, stream>>>(
       raw_X, raw_P, d, N_val, false);
   cudaEventRecord(ctx.carry_end[3], stream);
@@ -809,7 +794,6 @@ auto run_fermat_pipeline(
     squarings++;
 
     if (mpz_tstbit(p_minus_1, i)) {
-      strict_normalize_kernel<<<1, 1024, 0, stream>>>(raw_X, N_val);
       single_block_arbitrary_conditional_sub_p_kernel<<<1, 1024, 0, stream>>>(
           raw_X, raw_P, d, N_val, true);
       multiplies++;
@@ -841,7 +825,6 @@ auto run_fermat_pipeline(
   float ms = 0;
   cudaEventElapsedTime(&ms, start, stop);
 
-  strict_normalize_kernel<<<1, 1024, 0, stream>>>(raw_X, N_val);
   thrust::host_vector<uint64_t> final_limbs = d_X;
   mpz_t final_val;
   mpz_init(final_val);
@@ -1547,8 +1530,12 @@ auto main(int argc, char **argv) -> int {
 
     StreamContext ctx;
     std::vector<uint64_t> empty_vec;
-    run_fermat_pipeline(p, bit_len, d, N_val, inv_n, modulus,
-                        thrust::raw_pointer_cast(precomp_device.get()),
-                        constant_precomp, ctx, empty_vec, empty_vec, 0, 0, 1);
+    const bool passed = run_fermat_pipeline(
+        p, bit_len, d, N_val, inv_n, modulus,
+        thrust::raw_pointer_cast(precomp_device.get()), constant_precomp, ctx,
+        empty_vec, empty_vec, 0, 0, 1);
+    std::cout << "FERMAT " << (passed ? "PASS" : "FAIL") << '\n';
+    mpz_clear(p);
+    return passed ? 0 : 1;
   }
 }

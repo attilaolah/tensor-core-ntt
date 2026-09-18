@@ -18,10 +18,10 @@
           config.allowUnfree = true;
         };
         exports = ''
-          export CPATH=${pkgs.cudaPackages.cudatoolkit}/include:$CPATH
-          export CUDA_PATH=${pkgs.cudaPackages.cudatoolkit}
-          export LD_LIBRARY_PATH=${pkgs.cudaPackages.cudatoolkit}/lib:/run/opengl-driver/lib:$LD_LIBRARY_PATH
-          export LIBRARY_PATH=${pkgs.cudaPackages.cudatoolkit}/lib:$LIBRARY_PATH
+          export CPATH=${pkgs.cudaPackages_13_4.cudatoolkit}/include:$CPATH
+          export CUDA_PATH=${pkgs.cudaPackages_13_4.cudatoolkit}
+          export LD_LIBRARY_PATH=${pkgs.cudaPackages_13_4.cudatoolkit}/lib:/run/opengl-driver/lib:$LD_LIBRARY_PATH
+          export LIBRARY_PATH=${pkgs.cudaPackages_13_4.cudatoolkit}/lib:$LIBRARY_PATH
         '';
       in {
         formatter = pkgs.alejandra;
@@ -33,7 +33,7 @@
 
           buildInputs = with pkgs; [
             boost
-            cudaPackages.cudatoolkit
+            cudaPackages_13_4.cudatoolkit
             gmp
           ];
 
@@ -52,7 +52,7 @@
 
           postFixup = ''
             wrapProgram $out/bin/crunch_sm_86 \
-              --prefix LD_LIBRARY_PATH : /run/opengl-driver/lib:${pkgs.cudaPackages.cudatoolkit}/lib
+              --prefix LD_LIBRARY_PATH : /run/opengl-driver/lib:${pkgs.cudaPackages_13_4.cudatoolkit}/lib
           '';
 
           meta = with pkgs.lib; {
@@ -65,7 +65,7 @@
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             boost
-            cudaPackages.cudatoolkit
+            cudaPackages_13_4.cudatoolkit
             cudaPackages.nsight_compute
             cudaPackages.nsight_systems
             gmp
